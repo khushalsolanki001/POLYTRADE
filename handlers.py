@@ -1426,7 +1426,7 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
 
     market, mode = await _get_target_market(slug_override)
     if not market:
-        return False, "Could not find a valid BTC 5m market right now\."
+        return False, "Could not find a valid BTC 5m market right now\\."
 
     outcomes = json.loads(market.get("outcomes", "[]"))
     token_ids = json.loads(market.get("clobTokenIds", "[]"))
@@ -1434,7 +1434,7 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     
     idx = _find_outcome_index(outcomes, outcome)
     if idx is None:
-        return False, f"Outcome not found\. Available: {_esc(', '.join(outcomes))}"
+        return False, f"Outcome not found\\. Available: {_esc(', '.join(outcomes))}"
     
     actual_outcome = outcomes[idx]
     slug = market.get("slug", "unknown")
@@ -1457,14 +1457,14 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     
     position = db.get_paper_position(user_id, slug, actual_outcome)
     if not position or position["shares"] <= 0:
-        return False, f"You don't own any shares of {_esc(actual_outcome)}\."
+        return False, f"You don't own any shares of {_esc(actual_outcome)}\\."
 
     # If shares_to_sell is None, sell all
     if shares_to_sell is None:
         shares_to_sell = position["shares"]
 
     if shares_to_sell > position["shares"]:
-        return False, f"You only have {position['shares']:.2f} shares\."
+        return False, f"You only have {position['shares']:.2f} shares\\."
         
     proceeds = shares_to_sell * price
     balance = db.get_paper_balance(user_id)
@@ -1519,8 +1519,17 @@ async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user_id = update.effective_user.id
-    ok, message = await _paper_sell_core(user_id, outcome, shares_to_sell, slug_override)
-    await update.message.reply_text(message, parse_mode="MarkdownV2")
+    try:
+        ok, message = await _paper_sell_core(user_id, outcome, shares_to_sell, slug_override)
+        try:
+            await update.message.reply_text(message, parse_mode="MarkdownV2")
+        except Exception as fmt_err:
+            logger.warning("MarkdownV2 failed in paper_sell: %s", fmt_err)
+            plain = message.replace("*", "").replace("`", "").replace("\\", "")
+            await update.message.reply_text(plain)
+    except Exception as exc:
+        logger.error("Error in paper_sell: %s", exc, exc_info=True)
+        await update.message.reply_text(f"\u274c Error executing sell: {exc}")
 
 
 async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
@@ -1532,7 +1541,7 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
     positions = db.get_all_paper_positions(user_id)
 
     if not positions:
-        return False, "You have no open positions to sell\."
+        return False, "You have no open positions to sell\\."
 
     total_proceeds = 0.0
     total_pnl = 0.0
@@ -1614,8 +1623,17 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
 async def cmd_sellall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sell all paper positions at current market prices."""
     user_id = update.effective_user.id
-    ok, message = await _paper_sellall_core(user_id)
-    await update.message.reply_text(message, parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
+    try:
+        ok, message = await _paper_sellall_core(user_id)
+        try:
+            await update.message.reply_text(message, parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
+        except Exception as fmt_err:
+            logger.warning("MarkdownV2 failed in sellall: %s", fmt_err)
+            plain = message.replace("*", "").replace("`", "").replace("\\", "")
+            await update.message.reply_text(plain, reply_markup=_main_menu_keyboard())
+    except Exception as exc:
+        logger.error("Error in sellall: %s", exc, exc_info=True)
+        await update.message.reply_text(f"\u274c Error: {exc}", reply_markup=_main_menu_keyboard())
 
 async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
