@@ -914,15 +914,38 @@ def _pick_market_for_now(markets: list[dict]) -> tuple[dict | None, str]:
 
 
 def _format_market_window_text(market: dict) -> str:
+    """Format window using API's startDate/endDate (may be unreliable)."""
     start_utc, end_utc = _market_window_utc(market)
     if not start_utc or not end_utc:
         return "Window: Unknown"
 
-    start_et = start_utc.astimezone(MARKET_TZ).strftime("%I:%M %p")
-    end_et = end_utc.astimezone(MARKET_TZ).strftime("%I:%M %p")
-    start_ist = start_utc.astimezone(USER_TZ).strftime("%I:%M %p")
-    end_ist = end_utc.astimezone(USER_TZ).strftime("%I:%M %p")
+    start_et = start_utc.astimezone(MARKET_TZ).strftime("%I:%M %p").lstrip("0")
+    end_et = end_utc.astimezone(MARKET_TZ).strftime("%I:%M %p").lstrip("0")
+    start_ist = start_utc.astimezone(USER_TZ).strftime("%I:%M %p").lstrip("0")
+    end_ist = end_utc.astimezone(USER_TZ).strftime("%I:%M %p").lstrip("0")
     return f"Window ET: {start_et} to {end_et} | IST: {start_ist} to {end_ist}"
+
+
+def _format_window_from_slug(slug: str) -> str:
+    """
+    Compute the 5-minute window times directly from the slug timestamp.
+    Much more reliable than the Gamma API's startDate/endDate fields.
+
+    e.g. slug 'btc-updown-5m-1773438900' -> window 5:55 PM to 6:00 PM ET
+    """
+    try:
+        ts = int(slug.split("-")[-1])
+    except (ValueError, IndexError):
+        return "Window: Unknown"
+
+    start_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+    end_utc = datetime.fromtimestamp(ts + WINDOW_SECONDS, tz=timezone.utc)
+
+    start_et = start_utc.astimezone(MARKET_TZ).strftime("%I:%M %p").lstrip("0")
+    end_et = end_utc.astimezone(MARKET_TZ).strftime("%I:%M %p").lstrip("0")
+    start_ist = start_utc.astimezone(USER_TZ).strftime("%I:%M %p").lstrip("0")
+    end_ist = end_utc.astimezone(USER_TZ).strftime("%I:%M %p").lstrip("0")
+    return f"Window: {start_et} - {end_et} ET | {start_ist} - {end_ist} IST"
 
 
 def _resolve_slug_from_args(args: list[str]) -> tuple[str | None, list[str]]:
@@ -1092,10 +1115,9 @@ async def _get_target_market(slug_override: str | None = None) -> tuple[dict | N
 
     - If slug_override is given, use that exact slug.
     - Otherwise, try multiple time windows to find the currently ACTIVE one:
-        1. Next window  (ts + 300)  — Polymarket shows this as "current" while
-           the current 5min block is being measured/resolved.
-        2. Current window (ts)      — might still be tradeable.
-        3. Previous window (ts-300) — fallback.
+        1. Current window (ts)      — the window currently being measured.
+        2. Previous window (ts-300) — just resolved, fallback.
+        3. Next window  (ts + 300)  — only if current doesn't exist yet.
     """
     if slug_override:
         url = f"https://polymarket.com/event/{slug_override}"
@@ -1106,11 +1128,11 @@ async def _get_target_market(slug_override: str | None = None) -> tuple[dict | N
         return None, "Could not load BTC 5m market data."
 
     ts = _compute_current_5m_timestamp()
-    # Try windows in priority order: next → current → previous
+    # Try windows in priority order: current → previous → next
     candidates = [
-        (ts + WINDOW_SECONDS, "auto-next"),
         (ts,                  "auto"),
         (ts - WINDOW_SECONDS, "auto-prev"),
+        (ts + WINDOW_SECONDS, "auto-next"),
     ]
 
     for candidate_ts, label in candidates:
@@ -1384,7 +1406,7 @@ async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_ov
     new_balance = balance - amount_usd
     total_value = new_shares * price  # current value at buy price
     source_tag = "CLOB live" if price_source == 'clob' else "Gamma est"
-    window_text = _format_market_window_text(market)
+    window_text = _format_window_from_slug(slug)
 
     # Get the ET label (e.g. "5:40 PM ET") from the slug timestamp
     slug_parts = slug.split("-")
@@ -1481,7 +1503,7 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     price_str = f"{price:.4f}"
     shares_str_fmt = f"{shares_to_sell:.2f}"
     source_note = " \\(CLOB live\\)" if price_source == "clob" else " \\(Gamma est\\)"
-    window_text = _format_market_window_text(market)
+    window_text = _format_window_from_slug(slug)
     event_url = f"{TARGET_EVENT_URL_BASE}-{slug.split('-')[-1]}" if slug != "unknown" else TARGET_EVENT_URL_BASE
     
     pnl = (price - position["avg_price"]) * shares_to_sell
