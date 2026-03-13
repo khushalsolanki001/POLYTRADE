@@ -251,6 +251,8 @@ def main():
     # Clean up amount fields in case they have a $ sign
     if hasattr(args, 'amount') and args.amount:
         args.amount = args.amount.replace('$', '')
+    if hasattr(args, 'shares') and args.shares:
+        args.shares = args.shares.replace('$', '')
         
     if args.command == "buy":
         asyncio.run(buy(args))
