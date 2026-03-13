@@ -5,6 +5,11 @@ import sys
 import re
 from typing import Optional
 
+# Fix Windows console encoding for emojis
+import sys
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 # Import local DB functions
 import db
 
