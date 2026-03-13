@@ -57,6 +57,24 @@ def init_db() -> None:
                 created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (user_id, wallet_address)
             );
+
+            CREATE TABLE IF NOT EXISTS paper_users (
+                user_id    INTEGER PRIMARY KEY,
+                balance    REAL NOT NULL DEFAULT 10000.0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS paper_positions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL REFERENCES paper_users(user_id) ON DELETE CASCADE,
+                market_slug   TEXT NOT NULL,
+                market_title  TEXT,
+                outcome       TEXT NOT NULL,
+                shares        REAL NOT NULL DEFAULT 0.0,
+                avg_price     REAL NOT NULL DEFAULT 0.0,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (user_id, market_slug, outcome)
+            );
         """)
         conn.commit()
         logger.info("✅ Database initialised at '%s'", DB_PATH)
@@ -163,3 +181,59 @@ def count_wallets_for_user(user_id: int) -> int:
             (user_id,),
         ).fetchone()
         return row[0] if row else 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Paper Trading Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_paper_user(user_id: int, starting_balance: float = 10000.0) -> None:
+    """Ensure a paper trading user exists."""
+    with _connect() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO paper_users (user_id, balance)
+            VALUES (?, ?)
+        """, (user_id, starting_balance))
+
+def get_paper_balance(user_id: int) -> float:
+    """Get the current virtual balance of a paper user."""
+    with _connect() as conn:
+        row = conn.execute("SELECT balance FROM paper_users WHERE user_id = ?", (user_id,)).fetchone()
+        return row["balance"] if row else 0.0
+
+def update_paper_balance(user_id: int, new_balance: float) -> None:
+    """Update the virtual balance of a paper user."""
+    with _connect() as conn:
+        conn.execute("UPDATE paper_users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
+
+def upsert_paper_position(user_id: int, market_slug: str, market_title: str, outcome: str, shares: float, avg_price: float) -> None:
+    """Insert or update a paper trading position."""
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO paper_positions (user_id, market_slug, market_title, outcome, shares, avg_price)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, market_slug, outcome) DO UPDATE SET
+                shares = excluded.shares,
+                avg_price = excluded.avg_price,
+                market_title = excluded.market_title
+        """, (user_id, market_slug, market_title, outcome, shares, avg_price))
+
+def get_paper_position(user_id: int, market_slug: str, outcome: str) -> Optional[sqlite3.Row]:
+    """Get a specific position."""
+    with _connect() as conn:
+        return conn.execute("""
+            SELECT * FROM paper_positions
+            WHERE user_id = ? AND market_slug = ? AND outcome = ?
+        """, (user_id, market_slug, outcome)).fetchone()
+
+def remove_paper_position(position_id: int) -> None:
+    """Remove a paper position (e.g., when shares hit 0)."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM paper_positions WHERE id = ?", (position_id,))
+
+def get_all_paper_positions(user_id: int) -> list[sqlite3.Row]:
+    """Get all positions for a paper user."""
+    with _connect() as conn:
+        return conn.execute("""
+            SELECT * FROM paper_positions WHERE user_id = ? AND shares > 0 ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
