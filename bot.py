@@ -122,6 +122,9 @@ from handlers import (
     handle_menu_text,
     build_add_wallet_conversation,
     format_trade_alert,
+    cmd_paper_buy,
+    cmd_paper_sell,
+    cmd_portfolio,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +368,9 @@ def main() -> None:
     app.add_handler(CommandHandler("my_wallets",     cmd_my_wallets))
     app.add_handler(CommandHandler("history",        cmd_history))
     app.add_handler(CommandHandler("remove_wallet",  cmd_remove_wallet))
+    app.add_handler(CommandHandler("paper_buy",      cmd_paper_buy))
+    app.add_handler(CommandHandler("paper_sell",     cmd_paper_sell))
+    app.add_handler(CommandHandler("portfolio",      cmd_portfolio))
 
     # 3. Inline button callbacks
     app.add_handler(CallbackQueryHandler(callback_remove_wallet, pattern=r"^remove:"))

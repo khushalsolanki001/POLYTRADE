@@ -1,4 +1,4 @@
-﻿"""
+"""
 handlers.py — Telegram command & conversation handlers for PolyTrack Bot
 =========================================================================
 Defines every handler that the ApplicationBuilder registers:
@@ -22,6 +22,9 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+import aiohttp
+import json
+import re
 from telegram.ext import (
     ContextTypes,
     ConversationHandler,
@@ -53,7 +56,7 @@ MAX_WALLETS = 10
 
 # ─── All menu button labels (used in fallback matching) ──────────────────────
 MENU_BUTTONS = frozenset(
-    ["\u2795 Add Wallet", "\U0001f4cb My Wallets", "\U0001f5d1\ufe0f Remove Wallet", "\U0001f550 History", "\u2753 Help"]
+    ["\u2795 Add Wallet", "\U0001f4cb My Wallets", "\U0001f5d1\ufe0f Remove Wallet", "\U0001f550 History", "\U0001f4bc Portfolio", "\u2753 Help"]
 )
 
 
@@ -66,8 +69,8 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             ["\u2795 Add Wallet",  "\U0001f4cb My Wallets"],
-            ["\U0001f550 History",  "\U0001f5d1\ufe0f Remove Wallet"],
-            ["\u2753 Help"],
+            ["\U0001f550 History", "\U0001f4bc Portfolio"],
+            ["\U0001f5d1\ufe0f Remove Wallet", "\u2753 Help"],
         ],
         resize_keyboard=True,
         input_field_placeholder="Choose an option\u2026",
@@ -141,6 +144,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "\u2022 Alert only on BUY trades if you prefer\n"
         "\u2022 Show the last 5 trades of any wallet on demand\n"
         "\u2022 Send rich, real\\-time notifications\n\n"
+        "\U0001f4b8 *Paper Trading Phase 2:*\n"
+        "You have `$10,000` virtual USD to play with\\! Try these commands:\n"
+        "`/paper_buy <url> Yes 10$` \u2014 Buy $10 of 'Yes'\n"
+        "`/paper_sell <url> Yes 10` \u2014 Sell 10 shares of 'Yes'\n"
+        "`/portfolio` \u2014 View your active paper trades\n\n"
         "Use the menu below to get started\\!",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=_main_menu_keyboard(),
@@ -702,6 +710,8 @@ async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await cmd_remove_wallet(update, context)
     elif text == "\U0001f550 History":
         await cmd_history(update, context)
+    elif text == "\U0001f4bc Portfolio":
+        await cmd_portfolio(update, context)
     elif text == "\u2753 Help":
         await cmd_help(update, context)
     else:
@@ -814,3 +824,198 @@ def build_add_wallet_conversation() -> ConversationHandler:
         per_message=False,
         name="add_wallet_conv",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Paper Trading Telegram Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+GAMMA_API_URL = "https://gamma-api.polymarket.com/events?slug={slug}"
+
+async def _get_market_data(url: str) -> dict | None:
+    match = re.search(r'polymarket\.com/event/([^/?#]+)', url)
+    if not match: return None
+    slug = match.group(1)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
+            if resp.status != 200: return None
+            data = await resp.json()
+            if not data or not isinstance(data, list): return None
+            return data[0]
+
+def _find_outcome_index(outcomes: list[str], target: str) -> int | None:
+    target_lower = target.lower()
+    for i, o in enumerate(outcomes):
+        if o.lower() == target_lower: return i
+    return None
+
+async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage: `/paper_buy <url> <outcome> <amount_usd>`\nExample: `/paper_buy https://polymarket.com/event/slug Yes 100`", parse_mode="MarkdownV2")
+        return
+    url, outcome, amount_str = context.args[0], context.args[1], context.args[2].replace('$', '')
+    
+    try: amount_usd = float(amount_str)
+    except: return await update.message.reply_text("Invalid amount.")
+    
+    user_id = update.effective_user.id
+    db.init_paper_user(user_id)
+    
+    event = await _get_market_data(url)
+    if not event or not event.get("markets"):
+        return await update.message.reply_text("Market not found.")
+    market = event["markets"][0]
+    outcomes = json.loads(market.get("outcomes", "[]"))
+    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+    
+    idx = _find_outcome_index(outcomes, outcome)
+    if idx is None:
+        return await update.message.reply_text(f"Outcome not found. Available: {', '.join(outcomes)}")
+    
+    price = float(outcome_prices[idx])
+    if price <= 0 or price >= 1:
+        return await update.message.reply_text("Invalid or stale price.")
+        
+    shares_to_buy = amount_usd / price
+    balance = db.get_paper_balance(user_id)
+    if balance < amount_usd:
+        return await update.message.reply_text(f"Insufficient funds. You have ${balance:.2f}.")
+        
+    db.update_paper_balance(user_id, balance - amount_usd)
+    slug = market.get("slug", "unknown")
+    title = market.get("question", "Unknown")
+    actual_outcome = outcomes[idx]
+    
+    existing = db.get_paper_position(user_id, slug, actual_outcome)
+    if existing:
+        total_cost = (existing["shares"] * existing["avg_price"]) + amount_usd
+        new_shares = existing["shares"] + shares_to_buy
+        new_avg = total_cost / new_shares
+    else:
+        new_shares, new_avg = shares_to_buy, price
+        
+    db.upsert_paper_position(user_id, slug, title, actual_outcome, new_shares, new_avg)
+    
+    await update.message.reply_text(
+        f"✅ *Paper Buy Executed!*\n"
+        f"Market: `{_esc_code(title)}`\n"
+        f"Action: Bought `{shares_to_buy:.2f}` shares of *{actual_outcome}*\n"
+        f"Price: `${price:.4f}` | Cost: `${amount_usd:.2f}`\n"
+        f"Virtual Balance: `${(balance - amount_usd):.2f}`",
+        parse_mode="MarkdownV2"
+    )
+
+async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage: `/paper_sell <url> <outcome> <shares>`\nExample: `/paper_sell https://polymarket.com/event/slug Yes 100`", parse_mode="MarkdownV2")
+        return
+    url, outcome, shares_str = context.args[0], context.args[1], context.args[2].replace('$', '')
+    
+    try: shares_to_sell = float(shares_str)
+    except: return await update.message.reply_text("Invalid amount.")
+    
+    user_id = update.effective_user.id
+    db.init_paper_user(user_id)
+    
+    event = await _get_market_data(url)
+    if not event or not event.get("markets"):
+        return await update.message.reply_text("Market not found.")
+    market = event["markets"][0]
+    outcomes = json.loads(market.get("outcomes", "[]"))
+    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+    
+    idx = _find_outcome_index(outcomes, outcome)
+    if idx is None:
+        return await update.message.reply_text(f"Outcome not found.")
+        
+    price = float(outcome_prices[idx])
+    slug = market.get("slug", "unknown")
+    actual_outcome = outcomes[idx]
+    
+    position = db.get_paper_position(user_id, slug, actual_outcome)
+    if not position or position["shares"] <= 0:
+        return await update.message.reply_text("You don't own any shares of this outcome.")
+    if shares_to_sell > position["shares"]:
+        return await update.message.reply_text(f"You only have {position['shares']:.2f} shares.")
+        
+    proceeds = shares_to_sell * price
+    balance = db.get_paper_balance(user_id)
+    db.update_paper_balance(user_id, balance + proceeds)
+    
+    rem_shares = position["shares"] - shares_to_sell
+    if rem_shares < 0.0001: db.remove_paper_position(position["id"])
+    else: db.upsert_paper_position(user_id, slug, position["market_title"], actual_outcome, rem_shares, position["avg_price"])
+    
+    pnl = (price - position["avg_price"]) * shares_to_sell
+    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    pnl_str = _esc_code(pnl_str)
+    
+    await update.message.reply_text(
+        f"✅ *Paper Sell Executed!*\n"
+        f"Market: `{_esc_code(position['market_title'])}`\n"
+        f"Action: Sold `{shares_to_sell:.2f}` shares of *{actual_outcome}*\n"
+        f"Price: `${price:.4f}` (Avg Cost: `${position['avg_price']:.4f}`)\n"
+        f"Proceeds: `${proceeds:.2f}` | PnL: `{pnl_str}`\n"
+        f"Virtual Balance: `${(balance + proceeds):.2f}`",
+        parse_mode="MarkdownV2"
+    )
+
+async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    db.init_paper_user(user_id)
+    
+    balance = db.get_paper_balance(user_id)
+    positions = db.get_all_paper_positions(user_id)
+    
+    if not positions:
+        return await update.message.reply_text(f"📜 *Virtual Portfolio*\n\n💵 Cash: `${balance:.2f}`\n\nYou have no active positions\\.", parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
+        
+    sent = await update.message.reply_text("Fetching live prices...", parse_mode="MarkdownV2")
+    
+    lines = [f"📜 *VIRTUAL PORTFOLIO*\n", f"💵 Cash: `${balance:.2f}`\n"]
+    total_val = balance
+    
+    async with aiohttp.ClientSession() as session:
+        for p in positions:
+            curr_val = p['shares'] * p['avg_price'] # fallback
+            price_str = "UNKNOWN"
+            pnl_str = "$0.00 (+0.00%)"
+            
+            try:
+                async with session.get(GAMMA_API_URL.format(slug=p['market_slug'])) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and isinstance(data, list) and data[0].get("markets"):
+                            market = data[0]["markets"][0]
+                            outcomes = json.loads(market.get("outcomes", "[]"))
+                            prices = json.loads(market.get("outcomePrices", "[]"))
+                            idx = _find_outcome_index(outcomes, p['outcome'])
+                            if idx is not None:
+                                curr_price = float(prices[idx])
+                                curr_val = curr_price * p['shares']
+                                cost = p['avg_price'] * p['shares']
+                                pnl = curr_val - cost
+                                pnl_pct = (pnl/cost)*100 if cost > 0 else 0
+                                price_str = f"${curr_price:.4f}"
+                                
+                                pnl_sign = "+" if pnl >= 0 else "-"
+                                pnl_str = f"{pnl_sign}${abs(pnl):.2f} ({pnl_sign}{abs(pnl_pct):.2f}%)"
+            except Exception: pass
+            
+            total_val += curr_val
+            
+            title = p['market_title'][:40] + ("..." if len(p['market_title']) > 40 else "")
+            lines.append(f"🔹 *{_esc(title)}*")
+            lines.append(f"  {p['outcome']} \\| `{p['shares']:.2f}` sh")
+            lines.append(f"  Avg: `${p['avg_price']:.4f}` \\| Cur: `{price_str}`")
+            lines.append(f"  Val: `${curr_val:.2f}` \\| PnL: `{_esc_code(pnl_str)}`\n")
+            
+    total_pnl = total_val - 10000.0
+    pnl_sign = "+" if total_pnl >= 0 else "-"
+    lines.append(f"🏦 *Total Value:* `${total_val:.2f}`")
+    lines.append(f"📈 *All\\-Time PnL:* `{pnl_sign}${abs(total_pnl):.2f}`")
+    
+    try:
+        await sent.edit_text("\n".join(lines), parse_mode="MarkdownV2")
+    except Exception as e:
+        await sent.edit_text("Error formatting portfolio view.")
