@@ -7,9 +7,13 @@ from datetime import datetime, timezone
 import json
 
 from db import get_all_wallets, update_last_timestamp
-from db import get_all_wallets, update_last_timestamp
 from handlers import format_trade_alert
-from api import fetch_trades, get_trade_title, parse_trade_outcome, parse_trade_price
+from api import (
+    fetch_trades, get_trade_title,
+    parse_trade_outcome, parse_trade_price,
+    parse_trade_type, parse_trade_size,
+    parse_trade_usd_value, parse_trade_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,37 @@ CTF_CONTRACT = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476
 TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
 
 _asset_cache = {}
+
+
+async def _fetch_api_trade(wallet: str, token_id_str: str) -> dict | None:
+    """
+    After an on-chain event fires, fetch the matching trade from the Polymarket
+    Data API to get accurate title, outcome, price and USDC size.
+
+    Strategy:
+      1. Try to match by asset token-ID (exact).
+      2. Fall back to the most-recent trade if it landed within the last 60 s.
+    Retries once after a 3 s pause to absorb Polymarket's indexing delay.
+    """
+    for attempt in range(2):
+        if attempt > 0:
+            await asyncio.sleep(3)
+        try:
+            trades = await fetch_trades(wallet, limit=10)
+            for t in trades:
+                if str(t.get("asset", "")) == token_id_str:
+                    return t
+            # Fallback: newest trade that arrived within 60 s
+            if trades:
+                now_ts   = int(datetime.now(timezone.utc).timestamp())
+                trade_ts = parse_trade_timestamp(trades[0])
+                if abs(trade_ts - now_ts) <= 60:
+                    return trades[0]
+        except Exception as exc:
+            logger.warning("API trade lookup attempt %d failed for %s: %s",
+                           attempt + 1, wallet[:10], exc)
+    return None
+
 
 async def fetch_market_info(asset_id: str, address: str = ""):
     """Fetch market title and outcome. First checks cache, then falls back to recent trades."""
@@ -156,44 +191,80 @@ async def run_block_scanner(app):
                         
                 if matches:
                     token_id = int.from_bytes(log['data'][:32], 'big')
-                    amount = int.from_bytes(log['data'][32:], 'big') / 1_000_000.0
-                    if amount <= 0:
+                    raw_amount = int.from_bytes(log['data'][32:], 'big') / 1_000_000.0
+                    if raw_amount <= 0:
                         continue
-                        
+
                     tx_hash = log['transactionHash'].hex()
                     ts = int(datetime.now(timezone.utc).timestamp())
-                    
-                    # Fetch coin info from cache or via API fallback if instantly needed
-                    market_info = await fetch_market_info(str(token_id), _from if "SELL" in [m[1] for m in matches] else _to)
-                    usd_val = amount * market_info['price']
-                    
+
+                    # Use the tracked wallet address for the API call.
+                    # BUY  → tracked wallet is in _to  (receiving shares)
+                    # SELL → tracked wallet is in _from (sending shares)
+                    primary_wallet = matches[0][0]["wallet_address"]
+
+                    # ── Fetch accurate trade data from Polymarket Data API ──
+                    # This gives us correct title, outcome, price and USDC size
+                    # instead of relying on the incomplete on-chain token cache.
+                    api_trade = await _fetch_api_trade(primary_wallet, str(token_id))
+
+                    if api_trade:
+                        api_type    = parse_trade_type(api_trade)
+                        api_size    = parse_trade_size(api_trade)
+                        api_price   = parse_trade_price(api_trade)
+                        api_usd     = parse_trade_usd_value(api_trade)
+                        api_outcome = parse_trade_outcome(api_trade)
+                        api_title   = get_trade_title(api_trade) or "Unknown Market"
+                        api_ts      = parse_trade_timestamp(api_trade) or ts
+                        logger.info(
+                            "⚡ API trade matched: %s %s %.2f USDC on %s",
+                            api_type, api_outcome, api_usd, api_title[:40],
+                        )
+                    else:
+                        # Fallback to raw on-chain data (no title/outcome available)
+                        market_info = await fetch_market_info(str(token_id), primary_wallet)
+                        api_type    = None
+                        api_size    = raw_amount
+                        api_price   = market_info["price"]
+                        api_usd     = raw_amount * api_price
+                        api_outcome = market_info["outcome"]
+                        api_title   = market_info["title"]
+                        api_ts      = ts
+                        logger.warning(
+                            "⚠️ API trade not found for token %s wallet %s — using raw on-chain data",
+                            token_id, primary_wallet[:10],
+                        )
+
                     for row, side in matches:
+                        trade_type = api_type or side  # API type takes priority
                         # Filters checks
-                        if row['only_buys'] and side != "BUY":
+                        if row['only_buys'] and trade_type != "BUY":
                             continue
-                        if usd_val < row['min_usd_threshold']:
+                        if api_usd < row['min_usd_threshold']:
                             continue
-                            
+
                         # Build Alert
                         poly_url = f"https://polymarket.com/profile/{row['wallet_address']}?tab=activity"
-                        
+
                         msg = format_trade_alert(
-                            trade_type     = side,
-                            size           = amount,
-                            price          = market_info['price'],
-                            usd_value      = usd_val,
-                            outcome        = market_info['outcome'],
-                            market_title   = market_info['title'],
+                            trade_type     = trade_type,
+                            size           = api_size,
+                            price          = api_price,
+                            usd_value      = api_usd,
+                            outcome        = api_outcome,
+                            market_title   = api_title,
                             wallet_address = row['wallet_address'],
                             nickname       = row['nickname'],
-                            timestamp      = ts,
+                            timestamp      = api_ts,
                             polymarket_url = poly_url,
                         )
-                        
-                        logger.info(f"⚡ FAST ALERT 🔥: {side} {amount} shares on {market_info['title'][:30]}... for user {row['chat_id']}")
-                        
+
+                        logger.info(
+                            "⚡ FAST ALERT 🔥: %s %s $%.2f on %s for chat %s",
+                            trade_type, api_outcome, api_usd, api_title[:30], row['chat_id'],
+                        )
+
                         try:
-                            # Send message asynchronously via telegram bot object
                             await app.bot.send_message(
                                 chat_id=row['chat_id'],
                                 text=msg,

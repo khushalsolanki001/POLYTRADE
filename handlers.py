@@ -13,7 +13,9 @@ Defines every handler that the ApplicationBuilder registers:
 
 import re
 import logging
+import time as _time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from telegram import (
     Update,
@@ -56,7 +58,7 @@ MAX_WALLETS = 10
 
 # ─── All menu button labels (used in fallback matching) ──────────────────────
 MENU_BUTTONS = frozenset(
-    ["\u2795 Add Wallet", "\U0001f4cb My Wallets", "\U0001f5d1\ufe0f Remove Wallet", "\U0001f550 History", "\U0001f4bc Portfolio", "\u2753 Help"]
+    ["\u2795 Add Wallet", "\U0001f4cb My Wallets", "\U0001f5d1\ufe0f Remove Wallet", "\U0001f550 History", "\U0001f4bc Portfolio", "\u26a1 Quick Trade", "\u2753 Help"]
 )
 
 
@@ -70,7 +72,8 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
         [
             ["\u2795 Add Wallet",  "\U0001f4cb My Wallets"],
             ["\U0001f550 History", "\U0001f4bc Portfolio"],
-            ["\U0001f5d1\ufe0f Remove Wallet", "\u2753 Help"],
+            ["\u26a1 Quick Trade", "\U0001f5d1\ufe0f Remove Wallet"],
+            ["\u2753 Help"],
         ],
         resize_keyboard=True,
         input_field_placeholder="Choose an option\u2026",
@@ -712,6 +715,8 @@ async def handle_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await cmd_history(update, context)
     elif text == "\U0001f4bc Portfolio":
         await cmd_portfolio(update, context)
+    elif text == "\u26a1 Quick Trade":
+        await cmd_quick_trade(update, context)
     elif text == "\u2753 Help":
         await cmd_help(update, context)
     else:
@@ -790,7 +795,7 @@ def build_add_wallet_conversation() -> ConversationHandler:
     menu_fallback = MessageHandler(
         filters.Regex(
             r"^(\u2795 Add Wallet|\U0001f4cb My Wallets|\U0001f5d1\ufe0f Remove Wallet"
-            r"|\U0001f550 History|\u2753 Help|\u274c Cancel)$"
+            r"|\U0001f550 History|\U0001f4bc Portfolio|\u26a1 Quick Trade|\u2753 Help|\u274c Cancel)$"
         ),
         _cancel,
     )
@@ -832,6 +837,367 @@ def build_add_wallet_conversation() -> ConversationHandler:
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com/events?slug={slug}"
 CLOB_PRICE_URL = "https://clob.polymarket.com/price"
+TARGET_EVENT_SLUG_BASE = "btc-updown-5m"
+TARGET_EVENT_URL_BASE = f"https://polymarket.com/event/{TARGET_EVENT_SLUG_BASE}"
+MARKET_TZ = ZoneInfo("America/New_York")
+USER_TZ = ZoneInfo("Asia/Kolkata")
+WINDOW_SECONDS = 300  # 5 minutes
+
+
+def _parse_iso_datetime(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        val = str(raw).strip()
+        if val.endswith("Z"):
+            val = val[:-1] + "+00:00"
+        dt = datetime.fromisoformat(val)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _market_window_utc(market: dict) -> tuple[datetime | None, datetime | None]:
+    start_utc = _parse_iso_datetime(
+        market.get("startDate")
+        or market.get("startTime")
+        or market.get("start_date")
+    )
+    end_utc = _parse_iso_datetime(
+        market.get("endDate")
+        or market.get("endTime")
+        or market.get("closeDate")
+        or market.get("closedTime")
+    )
+    return start_utc, end_utc
+
+
+def _pick_market_for_now(markets: list[dict]) -> tuple[dict | None, str]:
+    """Pick active market for current time; fallback to nearest upcoming, then latest."""
+    now_utc = datetime.now(timezone.utc)
+    active: list[tuple[datetime | None, datetime | None, dict]] = []
+    upcoming: list[tuple[datetime | None, datetime | None, dict]] = []
+    recent: list[tuple[datetime | None, datetime | None, dict]] = []
+
+    for m in markets:
+        if m.get("closed") is True or m.get("active") is False:
+            continue
+
+        start_utc, end_utc = _market_window_utc(m)
+
+        if start_utc and end_utc and start_utc <= now_utc < end_utc:
+            active.append((start_utc, end_utc, m))
+            continue
+
+        if start_utc and start_utc > now_utc:
+            upcoming.append((start_utc, end_utc, m))
+            continue
+
+        if end_utc and end_utc <= now_utc:
+            recent.append((start_utc, end_utc, m))
+
+    if active:
+        active.sort(key=lambda x: x[1] or datetime.max.replace(tzinfo=timezone.utc))
+        return active[0][2], "active"
+
+    if upcoming:
+        upcoming.sort(key=lambda x: x[0] or datetime.max.replace(tzinfo=timezone.utc))
+        return upcoming[0][2], "upcoming"
+
+    if recent:
+        recent.sort(key=lambda x: x[1] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return recent[0][2], "recent"
+
+    return (markets[0], "fallback") if markets else (None, "none")
+
+
+def _format_market_window_text(market: dict) -> str:
+    start_utc, end_utc = _market_window_utc(market)
+    if not start_utc or not end_utc:
+        return "Window: Unknown"
+
+    start_et = start_utc.astimezone(MARKET_TZ).strftime("%I:%M %p")
+    end_et = end_utc.astimezone(MARKET_TZ).strftime("%I:%M %p")
+    start_ist = start_utc.astimezone(USER_TZ).strftime("%I:%M %p")
+    end_ist = end_utc.astimezone(USER_TZ).strftime("%I:%M %p")
+    return f"Window ET: {start_et} to {end_et} | IST: {start_ist} to {end_ist}"
+
+
+def _resolve_slug_from_args(args: list[str]) -> tuple[str | None, list[str]]:
+    """
+    Check if the first arg is a URL, a timestamp suffix, or just an outcome.
+    Returns (slug_override_or_None, remaining_args).
+
+    Accepted formats:
+      /paper_buy Up 100                                     → auto-detect
+      /paper_buy 1773434700 Up 100                          → specific timestamp
+      /paper_buy https://polymarket.com/event/btc-updown-5m-1773434700 Up 100
+    """
+    if not args:
+        return None, args
+
+    first = args[0]
+
+    # Full URL
+    if first.startswith("http"):
+        m = re.search(r"polymarket\.com/event/([^/?#]+)", first)
+        if m:
+            slug = m.group(1)
+            if slug.startswith(TARGET_EVENT_SLUG_BASE):
+                return slug, args[1:]
+            else:
+                return None, []  # signal unsupported
+        return None, args[1:]
+
+    # Pure numeric timestamp → build slug
+    if first.isdigit() and len(first) >= 9:
+        slug = f"{TARGET_EVENT_SLUG_BASE}-{first}"
+        return slug, args[1:]
+
+    # Otherwise it's probably the outcome directly
+    return None, args
+
+
+def _extract_buy_args(args: list[str]) -> tuple[str | None, str | None, float | None, str | None]:
+    """
+    Parse buy arguments. Returns (slug_override, outcome, amount_usd, error).
+
+    Supports:
+      /paper_buy Up 100
+      /paper_buy 1773434700 Up 100
+      /paper_buy https://polymarket.com/event/btc-updown-5m-1773434700 Up 100
+    """
+    if len(args) < 2:
+        return None, None, None, None
+
+    slug_override, remaining = _resolve_slug_from_args(args)
+
+    if not remaining or len(remaining) < 2:
+        # If we consumed the URL/timestamp but not enough args left
+        if slug_override and len(remaining) == 0:
+            return None, None, None, None  # just not enough args
+        if len(remaining) < 2:
+            return None, None, None, None
+
+    outcome = remaining[0]
+    amount_str = remaining[1]
+
+    try:
+        amount_usd = float(amount_str.replace("$", "").replace(",", ""))
+        if amount_usd <= 0:
+            raise ValueError
+    except Exception:
+        return None, None, None, "Invalid amount. Use a positive number like 10 or 100."
+
+    return slug_override, outcome, amount_usd, None
+
+
+def _extract_sell_args(args: list[str]) -> tuple[str | None, str | None, float | None, str | None]:
+    """
+    Parse sell arguments. Returns (slug_override, outcome, shares, error).
+
+    Supports:
+      /paper_sell Up 100
+      /paper_sell 1773434700 Up 100
+      /paper_sell https://polymarket.com/event/btc-updown-5m-1773434700 Up 100
+    """
+    if len(args) < 2:
+        return None, None, None, None
+
+    slug_override, remaining = _resolve_slug_from_args(args)
+
+    if not remaining or len(remaining) < 2:
+        return None, None, None, None
+
+    outcome = remaining[0]
+    shares_str = remaining[1].replace("$", "")
+
+    try:
+        shares = float(shares_str)
+        if shares <= 0:
+            raise ValueError
+    except Exception:
+        return None, None, None, "Invalid shares. Use a positive number."
+
+    return slug_override, outcome, shares, None
+
+
+def _quick_trade_keyboard(show_sell: bool = False) -> InlineKeyboardMarkup:
+    amounts = [10, 25, 50, 100]
+    rows = [
+        [
+            InlineKeyboardButton(f"🟢 Up ${amt}", callback_data=f"qbuy:Up:{amt}"),
+            InlineKeyboardButton(f"🔴 Down ${amt}", callback_data=f"qbuy:Down:{amt}"),
+        ]
+        for amt in amounts
+    ]
+    if show_sell:
+        rows.append([
+            InlineKeyboardButton("📤 Sell ALL Up", callback_data="qsell:Up:all"),
+            InlineKeyboardButton("📤 Sell ALL Down", callback_data="qsell:Down:all"),
+        ])
+    rows.append([
+        InlineKeyboardButton("💣 Sell ALL Positions", callback_data="qsell:all:all"),
+    ])
+    rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="qbuy:refresh")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _compute_current_5m_timestamp() -> int:
+    """
+    Compute the Unix timestamp for the CURRENT 5-minute BTC Up/Down window
+    on Polymarket.
+
+    Each window starts at a Unix timestamp that is an exact multiple of 300:
+      timestamp = (unix_now // 300) * 300
+
+    The slug is then: btc-updown-5m-{timestamp}
+    Polymarket labels the window by its END time (timestamp + 300).
+    """
+    now = int(_time.time())
+    return (now // 300) * 300
+
+
+def _compute_5m_slug(ts: int | None = None) -> str:
+    """
+    Build the Polymarket event slug for a specific 5-minute window.
+    If ts is None, uses the current time.
+    """
+    if ts is None:
+        ts = _compute_current_5m_timestamp()
+    return f"{TARGET_EVENT_SLUG_BASE}-{ts}"
+
+
+async def _get_target_market(slug_override: str | None = None) -> tuple[dict | None, str | None]:
+    """
+    Fetch the target BTC 5m market.
+
+    - If slug_override is given (e.g. 'btc-updown-5m-1773434700'), use that
+      exact slug.
+    - Otherwise, auto-compute the current 5-minute window timestamp and build
+      the slug automatically.
+    """
+    if slug_override:
+        slug = slug_override
+        mode_label = "specific"
+    else:
+        ts = _compute_current_5m_timestamp()
+        slug = _compute_5m_slug(ts)
+        mode_label = "auto"
+        logger.info("Auto-detected BTC 5m slug: %s (ts=%d)", slug, ts)
+
+    url = f"https://polymarket.com/event/{slug}"
+    event = await _get_market_data(url)
+
+    if not event or not event.get("markets"):
+        # If auto-detect fails, try the PREVIOUS window (in case the current
+        # one hasn't been created yet on Polymarket)
+        if mode_label == "auto":
+            prev_ts = ts - WINDOW_SECONDS
+            prev_slug = _compute_5m_slug(prev_ts)
+            logger.info("Current window not found, trying previous: %s", prev_slug)
+            url = f"https://polymarket.com/event/{prev_slug}"
+            event = await _get_market_data(url)
+            if event and event.get("markets"):
+                market = event["markets"][0]
+                return market, "auto-prev"
+        return None, "Could not load BTC 5m market data."
+
+    market = event["markets"][0]
+    return market, mode_label
+
+
+async def cmd_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    db.init_paper_user(user_id)
+    has_positions = bool(db.get_all_paper_positions(user_id))
+
+    market, mode = await _get_target_market()
+    if not market:
+        await update.message.reply_text("Could not load quick trade market right now.")
+        return
+
+    title = market.get("question") or market.get("title") or "BTC Up/Down 5m"
+    window_text = _format_market_window_text(market)
+    balance = db.get_paper_balance(user_id)
+    await update.message.reply_text(
+        "⚡ *Quick Trade Buttons*\n"
+        f"Market: *{_esc(str(title))}*\n"
+        f"{_esc(window_text)}\n"
+        f"Mode: `{_esc_code(mode)}`\n"
+        f"💵 Balance: `${_esc_code(f'{balance:.2f}')}`\n\n"
+        "Tap a button to BUY or SELL instantly\\."
+        ,
+        parse_mode="MarkdownV2",
+        reply_markup=_quick_trade_keyboard(show_sell=has_positions),
+    )
+
+
+async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    payload = query.data or ""
+    user_id = query.from_user.id
+
+    # ── Refresh button ──
+    if payload == "qbuy:refresh":
+        db.init_paper_user(user_id)
+        has_positions = bool(db.get_all_paper_positions(user_id))
+        market, mode = await _get_target_market()
+        if not market:
+            await query.edit_message_text("Could not refresh market data right now.")
+            return
+        title = market.get("question") or market.get("title") or "BTC Up/Down 5m"
+        window_text = _format_market_window_text(market)
+        balance = db.get_paper_balance(user_id)
+        await query.edit_message_text(
+            "⚡ *Quick Trade Buttons*\n"
+            f"Market: *{_esc(str(title))}*\n"
+            f"{_esc(window_text)}\n"
+            f"Mode: `{_esc_code(mode)}`\n"
+            f"💵 Balance: `${_esc_code(f'{balance:.2f}')}`\n\n"
+            "Tap a button to BUY or SELL instantly\\."
+            ,
+            parse_mode="MarkdownV2",
+            reply_markup=_quick_trade_keyboard(show_sell=has_positions),
+        )
+        return
+
+    # ── Sell button (qsell:outcome:amount_or_all) ──
+    if payload.startswith("qsell:"):
+        parts = payload.split(":")
+        if len(parts) != 3:
+            await query.edit_message_text("Invalid sell action.")
+            return
+        outcome_key = parts[1]  # "Up", "Down", or "all"
+        amount_key = parts[2]   # "all" or a number
+
+        if outcome_key == "all":
+            # Sell ALL positions
+            ok, message = await _paper_sellall_core(user_id)
+        else:
+            # Sell all shares of a specific outcome
+            ok, message = await _paper_sell_core(user_id, outcome_key, None)  # None = sell all
+        await query.edit_message_text(message, parse_mode="MarkdownV2")
+        return
+
+    # ── Buy button (qbuy:outcome:amount) ──
+    parts = payload.split(":")
+    if len(parts) != 3 or parts[0] != "qbuy":
+        await query.edit_message_text("Invalid quick trade action.")
+        return
+
+    outcome = parts[1]
+    try:
+        amount_usd = float(parts[2])
+    except Exception:
+        await query.edit_message_text("Invalid amount in quick trade action.")
+        return
+
+    ok, message = await _paper_buy_core(user_id, outcome, amount_usd)
+    await query.edit_message_text(message, parse_mode="MarkdownV2")
 
 async def _get_market_data(url: str) -> dict | None:
     """Fetch event+market metadata from Gamma API using the URL slug."""
@@ -887,29 +1253,42 @@ def _find_outcome_index(outcomes: list[str], target: str) -> int | None:
     return None
 
 async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage: `/paper_buy <url> <outcome> <amount_usd>`\nExample: `/paper_buy https://polymarket.com/event/slug Yes 100`", parse_mode="MarkdownV2")
+    slug_override, outcome, amount_usd, err = _extract_buy_args(context.args)
+    if err:
+        await update.message.reply_text(err)
         return
-    url, outcome, amount_str = context.args[0], context.args[1], context.args[2].replace('$', '')
-    
-    try: amount_usd = float(amount_str)
-    except: return await update.message.reply_text("Invalid amount.")
-    
-    user_id = update.effective_user.id
+    if outcome is None or amount_usd is None:
+        await update.message.reply_text(
+            "Usage:\n"
+            "`/paper_buy Up 100`\n"
+            "`/paper_buy 1773434700 Up 100` \\(timestamp suffix\\)\n"
+            "or `/paper_buy https://polymarket.com/event/btc-updown-5m-1773434700 Up 100`\n\n"
+            "💡 You can just use the number after `5m\\-` in the URL\\!\n"
+            "Also try `/quick_trade` for instant buttons\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=_quick_trade_keyboard(),
+        )
+        return
+
+    ok, message = await _paper_buy_core(update.effective_user.id, outcome, amount_usd, slug_override)
+    await update.message.reply_text(message, parse_mode="MarkdownV2")
+
+
+async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_override: str | None = None) -> tuple[bool, str]:
     db.init_paper_user(user_id)
-    
-    event = await _get_market_data(url)
-    if not event or not event.get("markets"):
-        return await update.message.reply_text("Market not found.")
-    market = event["markets"][0]
+
+    market, mode = await _get_target_market(slug_override)
+    if not market:
+        return False, "Could not find a valid BTC 5m market right now\."
+
     outcomes = json.loads(market.get("outcomes", "[]"))
     token_ids = json.loads(market.get("clobTokenIds", "[]"))
     gamma_prices = json.loads(market.get("outcomePrices", "[]"))
-    
+
     idx = _find_outcome_index(outcomes, outcome)
     if idx is None:
-        return await update.message.reply_text(f"Outcome not found\. Available: {_esc(', '.join(outcomes))}", parse_mode="MarkdownV2")
-    
+        return False, f"Outcome not found\. Available: {_esc(', '.join(outcomes))}"
+
     # Get real-time CLOB ASK price (what buyer pays)
     # CLOB API: side='sell' = what sellers are asking = your cost to buy
     actual_outcome = outcomes[idx]
@@ -928,15 +1307,15 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             price = gamma_price
             price_source = "gamma"
         else:
-            return await update.message.reply_text("Could not fetch a valid price for this market\. It may be closed or paused\.", parse_mode="MarkdownV2")
+            return False, "Could not fetch a valid price for this market\. It may be closed or paused\."
     else:
         price_source = "clob"
-        
+
     shares_to_buy = amount_usd / price
     balance = db.get_paper_balance(user_id)
     if balance < amount_usd:
-        return await update.message.reply_text(f"Insufficient funds. You have ${balance:.2f}.")
-        
+        return False, f"Insufficient funds\. You have ${balance:.2f}\."
+
     db.update_paper_balance(user_id, balance - amount_usd)
     slug = market.get("slug", "unknown")
     title = market.get("question", "Unknown")
@@ -956,51 +1335,49 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     price_str = f"{price:.4f}"
     shares_str = f"{shares_to_buy:.2f}"
     source_note = " \\(CLOB live\\)" if price_source == 'clob' else " \\(Gamma est\\)"
-    
-    await update.message.reply_text(
+    window_text = _format_market_window_text(market)
+    event_url = f"{TARGET_EVENT_URL_BASE}-{slug.split('-')[-1]}" if slug != "unknown" else TARGET_EVENT_URL_BASE
+
+    return True, (
         f"\u2705 *Paper Buy Executed\\!*\n"
+        f"Event: *{_esc('BTC Up/Down 5m')}*\n"
+        f"URL: {_esc(event_url)}\n"
         f"Market: `{_esc_code(title)}`\n"
+        f"{_esc(window_text)}\n"
+        f"Selection: `{_esc_code(mode)}`\n"
         f"Outcome: *{_esc(actual_outcome)}*\n"
         f"Shares: `{_esc_code(shares_str)}` @ `${_esc_code(price_str)}`{source_note}\n"
         f"Cost: `${_esc_code(amount_usd_str)}`\n"
         f"Virtual Balance: `${_esc_code(balance_str)}`",
-        parse_mode="MarkdownV2"
     )
 
-async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage: `/paper_sell <url> <outcome> <shares>`\nExample: `/paper_sell https://polymarket.com/event/slug Yes 100`", parse_mode="MarkdownV2")
-        return
-    url, outcome, shares_str = context.args[0], context.args[1], context.args[2].replace('$', '')
-    
-    try: shares_to_sell = float(shares_str)
-    except: return await update.message.reply_text("Invalid amount.")
-    
-    user_id = update.effective_user.id
+async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | None = None, slug_override: str | None = None) -> tuple[bool, str]:
+    """
+    Core sell logic. If shares_to_sell is None, sell ALL shares of that outcome.
+    """
     db.init_paper_user(user_id)
-    
-    event = await _get_market_data(url)
-    if not event or not event.get("markets"):
-        return await update.message.reply_text("Market not found\.")
-    market = event["markets"][0]
+
+    market, mode = await _get_target_market(slug_override)
+    if not market:
+        return False, "Could not find a valid BTC 5m market right now\."
+
     outcomes = json.loads(market.get("outcomes", "[]"))
     token_ids = json.loads(market.get("clobTokenIds", "[]"))
     gamma_prices = json.loads(market.get("outcomePrices", "[]"))
     
     idx = _find_outcome_index(outcomes, outcome)
     if idx is None:
-        return await update.message.reply_text(f"Outcome not found\. Available: {_esc(', '.join(outcomes))}", parse_mode="MarkdownV2")
+        return False, f"Outcome not found\. Available: {_esc(', '.join(outcomes))}"
     
     actual_outcome = outcomes[idx]
     slug = market.get("slug", "unknown")
 
     # Get real-time CLOB BID price (what seller receives)
-    # CLOB API: side='buy' = what buyers are bidding = what you receive when you sell
     price = None
     price_source = "gamma"
     if token_ids and idx < len(token_ids):
         async with aiohttp.ClientSession() as session:
-            price = await _get_clob_price(session, token_ids[idx], "buy")  # 'buy' = bid = what YOU receive
+            price = await _get_clob_price(session, token_ids[idx], "buy")
             if price is not None:
                 price_source = "clob"
     
@@ -1009,41 +1386,169 @@ async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if 0 < gamma_price < 1:
             price = gamma_price
         else:
-            price = 0  # resolved market — treat as 0 or 1
+            price = 0
     
     position = db.get_paper_position(user_id, slug, actual_outcome)
     if not position or position["shares"] <= 0:
-        return await update.message.reply_text("You don't own any shares of this outcome.")
+        return False, f"You don't own any shares of {_esc(actual_outcome)}\."
+
+    # If shares_to_sell is None, sell all
+    if shares_to_sell is None:
+        shares_to_sell = position["shares"]
+
     if shares_to_sell > position["shares"]:
-        return await update.message.reply_text(f"You only have {position['shares']:.2f} shares.")
+        return False, f"You only have {position['shares']:.2f} shares\."
         
     proceeds = shares_to_sell * price
     balance = db.get_paper_balance(user_id)
     db.update_paper_balance(user_id, balance + proceeds)
     
     rem_shares = position["shares"] - shares_to_sell
-    if rem_shares < 0.0001: db.remove_paper_position(position["id"])
-    else: db.upsert_paper_position(user_id, slug, position["market_title"], actual_outcome, rem_shares, position["avg_price"])
+    if rem_shares < 0.0001:
+        db.remove_paper_position(position["id"])
+    else:
+        db.upsert_paper_position(user_id, slug, position["market_title"], actual_outcome, rem_shares, position["avg_price"])
+
     proceeds_str = f"{proceeds:.2f}"
     balance_str = f"{(balance + proceeds):.2f}"
     price_str = f"{price:.4f}"
     shares_str_fmt = f"{shares_to_sell:.2f}"
-    avg_price_str = f"{position['avg_price']:.4f}"
     source_note = " \\(CLOB live\\)" if price_source == "clob" else " \\(Gamma est\\)"
+    window_text = _format_market_window_text(market)
+    event_url = f"{TARGET_EVENT_URL_BASE}-{slug.split('-')[-1]}" if slug != "unknown" else TARGET_EVENT_URL_BASE
     
     pnl = (price - position["avg_price"]) * shares_to_sell
     pnl_sign = "+" if pnl >= 0 else "-"
     pnl_str = _esc_code(f"{pnl_sign}${abs(pnl):.2f}")
     
-    await update.message.reply_text(
+    return True, (
         f"\u2705 *Paper Sell Executed\\!*\n"
+        f"Event: *{_esc('BTC Up/Down 5m')}*\n"
+        f"URL: {_esc(event_url)}\n"
         f"Market: `{_esc_code(position['market_title'])}`\n"
+        f"{_esc(window_text)}\n"
+        f"Selection: `{_esc_code(mode)}`\n"
         f"Outcome: *{_esc(actual_outcome)}*\n"
         f"Shares: `{_esc_code(shares_str_fmt)}` @ `${_esc_code(price_str)}`{source_note}\n"
         f"Proceeds: `${_esc_code(proceeds_str)}` \\| PnL: `{pnl_str}`\n"
-        f"Virtual Balance: `${_esc_code(balance_str)}`",
-        parse_mode="MarkdownV2"
+        f"Virtual Balance: `${_esc_code(balance_str)}`"
     )
+
+
+async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    slug_override, outcome, shares_to_sell, err = _extract_sell_args(context.args)
+    if err:
+        await update.message.reply_text(err)
+        return
+    if outcome is None or shares_to_sell is None:
+        await update.message.reply_text(
+            "Usage:\n"
+            "`/paper_sell Up 100`\n"
+            "`/paper_sell 1773434700 Up 100` \\(timestamp suffix\\)\n\n"
+            "💡 You can just use the number after `5m\\-` in the URL\\!\n"
+            "Also try `/sellall` to sell everything at once\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    user_id = update.effective_user.id
+    ok, message = await _paper_sell_core(user_id, outcome, shares_to_sell, slug_override)
+    await update.message.reply_text(message, parse_mode="MarkdownV2")
+
+
+async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
+    """
+    Sell ALL paper positions at current market prices.
+    Frees all positions and returns cash to balance.
+    """
+    db.init_paper_user(user_id)
+    positions = db.get_all_paper_positions(user_id)
+
+    if not positions:
+        return False, "You have no open positions to sell\."
+
+    total_proceeds = 0.0
+    total_pnl = 0.0
+    sold_lines = []
+    balance = db.get_paper_balance(user_id)
+
+    async with aiohttp.ClientSession() as session:
+        for p in positions:
+            slug = p["market_slug"]
+            outcome = p["outcome"]
+            shares = p["shares"]
+            avg_price = p["avg_price"]
+
+            # Try to get live BID price from CLOB
+            price = None
+            price_source = "gamma"
+            try:
+                api_url = GAMMA_API_URL.format(slug=slug)
+                async with session.get(api_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and isinstance(data, list) and data[0].get("markets"):
+                            market = data[0]["markets"][0]
+                            outcomes_list = json.loads(market.get("outcomes", "[]"))
+                            token_ids = json.loads(market.get("clobTokenIds", "[]"))
+                            gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
+                            idx = _find_outcome_index(outcomes_list, outcome)
+                            if idx is not None:
+                                # Try CLOB BID price first
+                                if token_ids and idx < len(token_ids):
+                                    price = await _get_clob_price(session, token_ids[idx], "buy")
+                                    if price is not None:
+                                        price_source = "clob"
+                                # Fallback to Gamma
+                                if price is None and gamma_prices_list and idx < len(gamma_prices_list):
+                                    gp = float(gamma_prices_list[idx])
+                                    if 0 < gp < 1:
+                                        price = gp
+            except Exception:
+                pass
+
+            if price is None:
+                price = avg_price  # worst case fallback: sell at your buy price
+                price_source = "fallback"
+
+            proceeds = shares * price
+            pnl = (price - avg_price) * shares
+            total_proceeds += proceeds
+            total_pnl += pnl
+
+            # Remove position from DB
+            db.remove_paper_position(p["id"])
+
+            pnl_sign = "+" if pnl >= 0 else "-"
+            title_short = (p["market_title"] or "Unknown")[:35]
+            sold_lines.append(
+                f"  • {_esc(outcome)} in `{_esc_code(title_short)}` — "
+                f"`{_esc_code(f'{shares:.2f}')}` sh @ `${_esc_code(f'{price:.4f}')}` "
+                f"→ `{_esc_code(f'{pnl_sign}${abs(pnl):.2f}')}`"
+            )
+
+    # Update balance
+    new_balance = balance + total_proceeds
+    db.update_paper_balance(user_id, new_balance)
+
+    total_pnl_sign = "+" if total_pnl >= 0 else "-"
+    msg_lines = [
+        f"💣 *All Positions Sold\\!*\n",
+        f"📦 *Positions closed:* {len(positions)}",
+    ] + sold_lines + [
+        f"\n💰 *Total Proceeds:* `${_esc_code(f'{total_proceeds:.2f}')}`",
+        f"📊 *Total PnL:* `{_esc_code(f'{total_pnl_sign}${abs(total_pnl):.2f}')}`",
+        f"💵 *New Balance:* `${_esc_code(f'{new_balance:.2f}')}`",
+    ]
+
+    return True, "\n".join(msg_lines)
+
+
+async def cmd_sellall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sell all paper positions at current market prices."""
+    user_id = update.effective_user.id
+    ok, message = await _paper_sellall_core(user_id)
+    await update.message.reply_text(message, parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
 
 async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id

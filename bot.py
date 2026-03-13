@@ -124,7 +124,10 @@ from handlers import (
     format_trade_alert,
     cmd_paper_buy,
     cmd_paper_sell,
+    cmd_sellall,
     cmd_portfolio,
+    cmd_quick_trade,
+    callback_quick_trade,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -370,11 +373,15 @@ def main() -> None:
     app.add_handler(CommandHandler("remove_wallet",  cmd_remove_wallet))
     app.add_handler(CommandHandler("paper_buy",      cmd_paper_buy))
     app.add_handler(CommandHandler("paper_sell",     cmd_paper_sell))
+    app.add_handler(CommandHandler("sellall",        cmd_sellall))
     app.add_handler(CommandHandler("portfolio",      cmd_portfolio))
+    app.add_handler(CommandHandler("quick_trade",    cmd_quick_trade))
 
     # 3. Inline button callbacks
     app.add_handler(CallbackQueryHandler(callback_remove_wallet, pattern=r"^remove:"))
     app.add_handler(CallbackQueryHandler(callback_history,       pattern=r"^hist:"))
+    app.add_handler(CallbackQueryHandler(callback_quick_trade,   pattern=r"^qbuy:"))
+    app.add_handler(CallbackQueryHandler(callback_quick_trade,   pattern=r"^qsell:"))
 
     # 4. Reply keyboard button text routing (catch-all text messages)
     app.add_handler(
@@ -396,9 +403,11 @@ def main() -> None:
             BotCommand("my_wallets", "List your tracked wallets"),
             BotCommand("history", "Show last 5 trades for a wallet"),
             BotCommand("remove_wallet", "Stop tracking a wallet"),
-            BotCommand("paper_buy", "Buy paper shares (e.g. /paper_buy <url> Yes 100)"),
-            BotCommand("paper_sell", "Sell paper shares (e.g. /paper_sell <url> Yes 100)"),
+            BotCommand("paper_buy", "Buy paper shares (e.g. /paper_buy Up 100)"),
+            BotCommand("paper_sell", "Sell paper shares (e.g. /paper_sell Up 100)"),
+            BotCommand("sellall", "Sell ALL paper positions at once"),
             BotCommand("portfolio", "View your paper trading portfolio"),
+            BotCommand("quick_trade", "Open Up/Down buy/sell buttons"),
         ]
         try:
             await app.bot.set_my_commands(commands)
