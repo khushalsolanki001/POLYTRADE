@@ -831,8 +831,10 @@ def build_add_wallet_conversation() -> ConversationHandler:
 # ─────────────────────────────────────────────────────────────────────────────
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com/events?slug={slug}"
+CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 
 async def _get_market_data(url: str) -> dict | None:
+    """Fetch event+market metadata from Gamma API using the URL slug."""
     match = re.search(r'polymarket\.com/event/([^/?#]+)', url)
     if not match: return None
     slug = match.group(1)
@@ -842,6 +844,41 @@ async def _get_market_data(url: str) -> dict | None:
             data = await resp.json()
             if not data or not isinstance(data, list): return None
             return data[0]
+
+async def _get_clob_price(session: aiohttp.ClientSession, token_id: str, side: str) -> float | None:
+    """
+    Fetch real-time price from CLOB order book.
+    
+    IMPORTANT — CLOB API direction is counter-intuitive:
+      side='buy'  = what market makers are BIDDING (= price you receive when SELLING)
+      side='sell' = what market makers are ASKING  (= price you PAY when BUYING)
+    
+    So call as:
+      _get_clob_price(session, token_id, 'sell') → your buy/ask price
+      _get_clob_price(session, token_id, 'buy')  → your sell/bid price
+    """
+    try:
+        params = {"token_id": token_id, "side": side}
+        async with session.get(CLOB_PRICE_URL, params=params) as r:
+            if r.status == 200:
+                d = await r.json()
+                p = float(d.get("price", 0))
+                return p if 0 < p < 1 else None
+    except Exception:
+        pass
+    return None
+
+async def _get_clob_midpoint(session: aiohttp.ClientSession, token_id: str) -> float | None:
+    """Fetch the mid-market price (between bid and ask). Best for portfolio valuation."""
+    try:
+        async with session.get("https://clob.polymarket.com/midpoint", params={"token_id": token_id}) as r:
+            if r.status == 200:
+                d = await r.json()
+                p = float(d.get("mid", 0))
+                return p if 0 < p < 1 else None
+    except Exception:
+        pass
+    return None
 
 def _find_outcome_index(outcomes: list[str], target: str) -> int | None:
     target_lower = target.lower()
@@ -866,15 +903,34 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return await update.message.reply_text("Market not found.")
     market = event["markets"][0]
     outcomes = json.loads(market.get("outcomes", "[]"))
-    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+    token_ids = json.loads(market.get("clobTokenIds", "[]"))
+    gamma_prices = json.loads(market.get("outcomePrices", "[]"))
     
     idx = _find_outcome_index(outcomes, outcome)
     if idx is None:
-        return await update.message.reply_text(f"Outcome not found. Available: {', '.join(outcomes)}")
+        return await update.message.reply_text(f"Outcome not found\. Available: {_esc(', '.join(outcomes))}", parse_mode="MarkdownV2")
     
-    price = float(outcome_prices[idx])
-    if price <= 0 or price >= 1:
-        return await update.message.reply_text("Invalid or stale price.")
+    # Get real-time CLOB ASK price (what buyer pays)
+    # CLOB API: side='sell' = what sellers are asking = your cost to buy
+    actual_outcome = outcomes[idx]
+    price = None
+    price_source = "gamma"
+    if token_ids and idx < len(token_ids):
+        async with aiohttp.ClientSession() as session:
+            price = await _get_clob_price(session, token_ids[idx], "sell")  # 'sell' = ask = what YOU pay
+            if price is not None:
+                price_source = "clob"
+    
+    # Fallback to Gamma API price if CLOB unavailable
+    if price is None:
+        gamma_price = float(gamma_prices[idx]) if gamma_prices and idx < len(gamma_prices) else 0
+        if 0 < gamma_price < 1:
+            price = gamma_price
+            price_source = "gamma"
+        else:
+            return await update.message.reply_text("Could not fetch a valid price for this market\. It may be closed or paused\.", parse_mode="MarkdownV2")
+    else:
+        price_source = "clob"
         
     shares_to_buy = amount_usd / price
     balance = db.get_paper_balance(user_id)
@@ -895,13 +951,19 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         new_shares, new_avg = shares_to_buy, price
         
     db.upsert_paper_position(user_id, slug, title, actual_outcome, new_shares, new_avg)
+    amount_usd_str = f"{amount_usd:.2f}"
+    balance_str = f"{(balance - amount_usd):.2f}"
+    price_str = f"{price:.4f}"
+    shares_str = f"{shares_to_buy:.2f}"
+    source_note = " \\(CLOB live\\)" if price_source == 'clob' else " \\(Gamma est\\)"
     
     await update.message.reply_text(
-        f"✅ *Paper Buy Executed!*\n"
+        f"\u2705 *Paper Buy Executed\\!*\n"
         f"Market: `{_esc_code(title)}`\n"
-        f"Action: Bought `{shares_to_buy:.2f}` shares of *{actual_outcome}*\n"
-        f"Price: `${price:.4f}` | Cost: `${amount_usd:.2f}`\n"
-        f"Virtual Balance: `${(balance - amount_usd):.2f}`",
+        f"Outcome: *{_esc(actual_outcome)}*\n"
+        f"Shares: `{_esc_code(shares_str)}` @ `${_esc_code(price_str)}`{source_note}\n"
+        f"Cost: `${_esc_code(amount_usd_str)}`\n"
+        f"Virtual Balance: `${_esc_code(balance_str)}`",
         parse_mode="MarkdownV2"
     )
 
@@ -919,18 +981,35 @@ async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     event = await _get_market_data(url)
     if not event or not event.get("markets"):
-        return await update.message.reply_text("Market not found.")
+        return await update.message.reply_text("Market not found\.")
     market = event["markets"][0]
     outcomes = json.loads(market.get("outcomes", "[]"))
-    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+    token_ids = json.loads(market.get("clobTokenIds", "[]"))
+    gamma_prices = json.loads(market.get("outcomePrices", "[]"))
     
     idx = _find_outcome_index(outcomes, outcome)
     if idx is None:
-        return await update.message.reply_text(f"Outcome not found.")
-        
-    price = float(outcome_prices[idx])
-    slug = market.get("slug", "unknown")
+        return await update.message.reply_text(f"Outcome not found\. Available: {_esc(', '.join(outcomes))}", parse_mode="MarkdownV2")
+    
     actual_outcome = outcomes[idx]
+    slug = market.get("slug", "unknown")
+
+    # Get real-time CLOB BID price (what seller receives)
+    # CLOB API: side='buy' = what buyers are bidding = what you receive when you sell
+    price = None
+    price_source = "gamma"
+    if token_ids and idx < len(token_ids):
+        async with aiohttp.ClientSession() as session:
+            price = await _get_clob_price(session, token_ids[idx], "buy")  # 'buy' = bid = what YOU receive
+            if price is not None:
+                price_source = "clob"
+    
+    if price is None:
+        gamma_price = float(gamma_prices[idx]) if gamma_prices and idx < len(gamma_prices) else 0
+        if 0 < gamma_price < 1:
+            price = gamma_price
+        else:
+            price = 0  # resolved market — treat as 0 or 1
     
     position = db.get_paper_position(user_id, slug, actual_outcome)
     if not position or position["shares"] <= 0:
@@ -945,18 +1024,24 @@ async def cmd_paper_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     rem_shares = position["shares"] - shares_to_sell
     if rem_shares < 0.0001: db.remove_paper_position(position["id"])
     else: db.upsert_paper_position(user_id, slug, position["market_title"], actual_outcome, rem_shares, position["avg_price"])
+    proceeds_str = f"{proceeds:.2f}"
+    balance_str = f"{(balance + proceeds):.2f}"
+    price_str = f"{price:.4f}"
+    shares_str_fmt = f"{shares_to_sell:.2f}"
+    avg_price_str = f"{position['avg_price']:.4f}"
+    source_note = " \\(CLOB live\\)" if price_source == "clob" else " \\(Gamma est\\)"
     
     pnl = (price - position["avg_price"]) * shares_to_sell
-    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-    pnl_str = _esc_code(pnl_str)
+    pnl_sign = "+" if pnl >= 0 else "-"
+    pnl_str = _esc_code(f"{pnl_sign}${abs(pnl):.2f}")
     
     await update.message.reply_text(
-        f"✅ *Paper Sell Executed!*\n"
+        f"\u2705 *Paper Sell Executed\\!*\n"
         f"Market: `{_esc_code(position['market_title'])}`\n"
-        f"Action: Sold `{shares_to_sell:.2f}` shares of *{actual_outcome}*\n"
-        f"Price: `${price:.4f}` (Avg Cost: `${position['avg_price']:.4f}`)\n"
-        f"Proceeds: `${proceeds:.2f}` | PnL: `{pnl_str}`\n"
-        f"Virtual Balance: `${(balance + proceeds):.2f}`",
+        f"Outcome: *{_esc(actual_outcome)}*\n"
+        f"Shares: `{_esc_code(shares_str_fmt)}` @ `${_esc_code(price_str)}`{source_note}\n"
+        f"Proceeds: `${_esc_code(proceeds_str)}` \\| PnL: `{pnl_str}`\n"
+        f"Virtual Balance: `${_esc_code(balance_str)}`",
         parse_mode="MarkdownV2"
     )
 
@@ -968,11 +1053,11 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     positions = db.get_all_paper_positions(user_id)
     
     if not positions:
-        return await update.message.reply_text(f"📜 *Virtual Portfolio*\n\n💵 Cash: `${balance:.2f}`\n\nYou have no active positions\\.", parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
+        return await update.message.reply_text(f"📜 *Virtual Portfolio*\n\n💵 Cash: `${_esc_code(f'{balance:.2f}')}`\n\nYou have no active positions\\.", parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
         
-    sent = await update.message.reply_text("Fetching live prices...", parse_mode="MarkdownV2")
+    sent = await update.message.reply_text("Fetching live prices\\.\\.\\.", parse_mode="MarkdownV2")
     
-    lines = [f"📜 *VIRTUAL PORTFOLIO*\n", f"💵 Cash: `${balance:.2f}`\n"]
+    lines = [f"\U0001fDDC *VIRTUAL PORTFOLIO*\n", f"\U0001f4b5 Cash: `${_esc_code(f'{balance:.2f}')}`\n"]
     total_val = balance
     
     async with aiohttp.ClientSession() as session:
@@ -982,40 +1067,51 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             pnl_str = "$0.00 (+0.00%)"
             
             try:
+                # Fetch metadata+token IDs from Gamma, then midpoint from CLOB
                 async with session.get(GAMMA_API_URL.format(slug=p['market_slug'])) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data and isinstance(data, list) and data[0].get("markets"):
                             market = data[0]["markets"][0]
                             outcomes = json.loads(market.get("outcomes", "[]"))
-                            prices = json.loads(market.get("outcomePrices", "[]"))
+                            token_ids = json.loads(market.get("clobTokenIds", "[]"))
+                            gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
                             idx = _find_outcome_index(outcomes, p['outcome'])
                             if idx is not None:
-                                curr_price = float(prices[idx])
-                                curr_val = curr_price * p['shares']
-                                cost = p['avg_price'] * p['shares']
-                                pnl = curr_val - cost
-                                pnl_pct = (pnl/cost)*100 if cost > 0 else 0
-                                price_str = f"${curr_price:.4f}"
-                                
-                                pnl_sign = "+" if pnl >= 0 else "-"
-                                pnl_str = f"{pnl_sign}${abs(pnl):.2f} ({pnl_sign}{abs(pnl_pct):.2f}%)"
+                                # Use CLOB midpoint for fairest portfolio valuation
+                                curr_price = None
+                                if token_ids and idx < len(token_ids):
+                                    curr_price = await _get_clob_midpoint(session, token_ids[idx])
+                                # Fallback to Gamma cache price
+                                if curr_price is None and gamma_prices_list and idx < len(gamma_prices_list):
+                                    gp = float(gamma_prices_list[idx])
+                                    if 0 < gp < 1:
+                                        curr_price = gp
+                                if curr_price is not None:
+                                    curr_val = curr_price * p['shares']
+                                    cost = p['avg_price'] * p['shares']
+                                    pnl = curr_val - cost
+                                    pnl_pct = (pnl/cost)*100 if cost > 0 else 0
+                                    price_str = f"${curr_price:.4f}"
+                                    pnl_sign = "+" if pnl >= 0 else "-"
+                                    pnl_str = f"{pnl_sign}${abs(pnl):.2f} ({pnl_sign}{abs(pnl_pct):.1f}%)"
             except Exception: pass
             
             total_val += curr_val
             
             title = p['market_title'][:40] + ("..." if len(p['market_title']) > 40 else "")
-            lines.append(f"🔹 *{_esc(title)}*")
-            lines.append(f"  {p['outcome']} \\| `{p['shares']:.2f}` sh")
-            lines.append(f"  Avg: `${p['avg_price']:.4f}` \\| Cur: `{price_str}`")
-            lines.append(f"  Val: `${curr_val:.2f}` \\| PnL: `{_esc_code(pnl_str)}`\n")
+            lines.append(f"\U0001f539 *{_esc(title)}*")
+            lines.append(f"  {_esc(p['outcome'])} \\| `{_esc_code(f'{p['shares']:.2f}')}` sh")
+            lines.append(f"  Avg: `${_esc_code(f'{p['avg_price']:.4f}')}` \\| Cur: `{_esc_code(price_str)}`")
+            lines.append(f"  Val: `${_esc_code(f'{curr_val:.2f}')}` \\| PnL: `{_esc_code(pnl_str)}`\n")
             
     total_pnl = total_val - 10000.0
     pnl_sign = "+" if total_pnl >= 0 else "-"
-    lines.append(f"🏦 *Total Value:* `${total_val:.2f}`")
-    lines.append(f"📈 *All\\-Time PnL:* `{pnl_sign}${abs(total_pnl):.2f}`")
+    lines.append(f"\U0001f3e6 *Total Value:* `${_esc_code(f'{total_val:.2f}')}`")
+    lines.append(f"\U0001f4c8 *All\\-Time PnL:* `{_esc_code(f'{pnl_sign}${abs(total_pnl):.2f}')}`")
     
     try:
         await sent.edit_text("\n".join(lines), parse_mode="MarkdownV2")
     except Exception as e:
-        await sent.edit_text("Error formatting portfolio view.")
+        logger.error(f"Error formatting portfolio view: {e}")
+        await sent.edit_text("Error formatting portfolio view\\.", parse_mode="MarkdownV2")

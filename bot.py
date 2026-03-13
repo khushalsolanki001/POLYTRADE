@@ -389,6 +389,22 @@ def main() -> None:
     
     # ── Send startup notification to all tracked users ────────────────────
     async def _post_init(app):
+        from telegram import BotCommand
+        commands = [
+            BotCommand("start", "Show main menu"),
+            BotCommand("help", "Show help message"),
+            BotCommand("my_wallets", "List your tracked wallets"),
+            BotCommand("history", "Show last 5 trades for a wallet"),
+            BotCommand("remove_wallet", "Stop tracking a wallet"),
+            BotCommand("paper_buy", "Buy paper shares (e.g. /paper_buy <url> Yes 100)"),
+            BotCommand("paper_sell", "Sell paper shares (e.g. /paper_sell <url> Yes 100)"),
+            BotCommand("portfolio", "View your paper trading portfolio"),
+        ]
+        try:
+            await app.bot.set_my_commands(commands)
+        except Exception as e:
+            logger.warning("Could not set bot commands: %s", e)
+            
         await _notify_startup(app)
         asyncio.create_task(scanner.run_block_scanner(app))
     app.post_init = _post_init
