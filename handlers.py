@@ -1249,12 +1249,13 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         ok, message = await _paper_buy_core(user_id, outcome, amount_usd)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 Sell ALL {outcome}", callback_data=f"qsell:{outcome}:all")]]) if ok else None
         try:
-            await query.edit_message_text(message, parse_mode="MarkdownV2")
+            await query.edit_message_text(message, parse_mode="MarkdownV2", reply_markup=keyboard)
         except Exception as fmt_err:
             logger.warning("MarkdownV2 failed in quick_trade buy: %s", fmt_err)
             plain = message.replace("*", "").replace("`", "").replace("\\", "")
-            await query.edit_message_text(plain)
+            await query.edit_message_text(plain, reply_markup=keyboard)
     except Exception as exc:
         logger.error("Error in quick_trade buy: %s", exc, exc_info=True)
         await query.edit_message_text(f"\u274c Error: {exc}")
@@ -1332,12 +1333,13 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         ok, message = await _paper_buy_core(update.effective_user.id, outcome, amount_usd, slug_override)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 Sell ALL {outcome}", callback_data=f"qsell:{outcome}:all")]]) if ok else None
         try:
-            await update.message.reply_text(message, parse_mode="MarkdownV2")
+            await update.message.reply_text(message, parse_mode="MarkdownV2", reply_markup=keyboard)
         except Exception as fmt_err:
             logger.warning("MarkdownV2 failed in paper_buy: %s", fmt_err)
             plain = message.replace("*", "").replace("`", "").replace("\\", "")
-            await update.message.reply_text(plain)
+            await update.message.reply_text(plain, reply_markup=keyboard)
     except Exception as exc:
         logger.error("Error in paper_buy: %s", exc, exc_info=True)
         await update.message.reply_text(f"\u274c Error executing buy: {exc}")
