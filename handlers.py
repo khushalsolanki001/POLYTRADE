@@ -1230,7 +1230,8 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
             ok, message = await _paper_sellall_core(user_id)
         else:
             # Sell all shares of a specific outcome
-            ok, message = await _paper_sell_core(user_id, outcome_key, None)  # None = sell all
+            slug_override_val = amount_key if amount_key != "all" else None
+            ok, message = await _paper_sell_core(user_id, outcome_key, None, slug_override_val)
         await query.edit_message_text(message, parse_mode="MarkdownV2")
         return
 
@@ -1248,8 +1249,8 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     try:
-        ok, message = await _paper_buy_core(user_id, outcome, amount_usd)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 Sell ALL {outcome}", callback_data=f"qsell:{outcome}:all")]]) if ok else None
+        ok, message, slug = await _paper_buy_core(user_id, outcome, amount_usd)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 Sell ALL {outcome}", callback_data=f"qsell:{outcome}:{slug}")]]) if ok and slug else None
         try:
             await query.edit_message_text(message, parse_mode="MarkdownV2", reply_markup=keyboard)
         except Exception as fmt_err:
@@ -1332,8 +1333,8 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        ok, message = await _paper_buy_core(update.effective_user.id, outcome, amount_usd, slug_override)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 Sell ALL {outcome}", callback_data=f"qsell:{outcome}:all")]]) if ok else None
+        ok, message, slug = await _paper_buy_core(update.effective_user.id, outcome, amount_usd, slug_override)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"📤 Sell ALL {outcome}", callback_data=f"qsell:{outcome}:{slug}")]]) if ok and slug else None
         try:
             await update.message.reply_text(message, parse_mode="MarkdownV2", reply_markup=keyboard)
         except Exception as fmt_err:
@@ -1345,12 +1346,12 @@ async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"\u274c Error executing buy: {exc}")
 
 
-async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_override: str | None = None) -> tuple[bool, str]:
+async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_override: str | None = None) -> tuple[bool, str, str | None]:
     db.init_paper_user(user_id)
 
     market, mode = await _get_target_market(slug_override)
     if not market:
-        return False, "Could not find a valid BTC 5m market right now\\."
+        return False, "Could not find a valid BTC 5m market right now\\.", None
 
     outcomes = json.loads(market.get("outcomes", "[]"))
     token_ids = json.loads(market.get("clobTokenIds", "[]"))
@@ -1358,7 +1359,7 @@ async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_ov
 
     idx = _find_outcome_index(outcomes, outcome)
     if idx is None:
-        return False, f"Outcome not found\\. Available: {_esc(', '.join(outcomes))}"
+        return False, f"Outcome not found\\. Available: {_esc(', '.join(outcomes))}", None
 
     # Get real-time CLOB ASK price (what buyer pays)
     actual_outcome = outcomes[idx]
@@ -1377,14 +1378,14 @@ async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_ov
             price = gamma_price
             price_source = "gamma"
         else:
-            return False, "Could not fetch a valid price\\. Market may be closed or paused\\."
+            return False, "Could not fetch a valid price\\. Market may be closed or paused\\.", None
     else:
         price_source = "clob"
 
     shares_to_buy = amount_usd / price
     balance = db.get_paper_balance(user_id)
     if balance < amount_usd:
-        return False, f"Insufficient funds\\. You have ${balance:.2f}\\."
+        return False, f"Insufficient funds\\. You have ${balance:.2f}\\.", None
 
     db.update_paper_balance(user_id, balance - amount_usd)
     slug = market.get("slug", "unknown")
@@ -1440,7 +1441,7 @@ async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_ov
         f"\U0001f4b5 *Balance:* `${_esc_code(f'{new_balance:.2f}')}`\n"
         f"\u23f0 *Time:* `{_esc_code(now_et)}` / `{_esc_code(now_ist)}`\n"
         f"\U0001f517 *Slug:* `{_esc_code(slug)}`"
-    )
+    ), slug
 
 async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | None = None, slug_override: str | None = None) -> tuple[bool, str]:
     """
