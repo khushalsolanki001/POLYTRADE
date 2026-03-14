@@ -148,7 +148,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "\u2022 Show the last 5 trades of any wallet on demand\n"
         "\u2022 Send rich, real\\-time notifications\n\n"
         "\U0001f4b8 *Paper Trading Phase 2:*\n"
-        "You have `$10,000` virtual USD to play with\\! Try these commands:\n"
+        "You have `$100` virtual USD to play with\\! Try these commands:\n"
         "`/paper_buy <url> Yes 10$` \u2014 Buy $10 of 'Yes'\n"
         "`/paper_sell <url> Yes 10` \u2014 Sell 10 shares of 'Yes'\n"
         "`/portfolio` \u2014 View your active paper trades\n\n"
@@ -1048,7 +1048,7 @@ def _extract_sell_args(args: list[str]) -> tuple[str | None, str | None, float |
 
 
 def _quick_trade_keyboard(show_sell: bool = False) -> InlineKeyboardMarkup:
-    amounts = [10, 25, 50, 100]
+    amounts = [1, 10, 25, 50, 100]
     rows = [
         [
             InlineKeyboardButton(f"🟢 Up ${amt}", callback_data=f"qbuy:Up:{amt}"),
@@ -1717,7 +1717,7 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             lines.append(f"  Avg: `${_esc_code(f'{p['avg_price']:.4f}')}` \\| Cur: `{_esc_code(price_str)}`")
             lines.append(f"  Val: `${_esc_code(f'{curr_val:.2f}')}` \\| PnL: `{_esc_code(pnl_str)}`\n")
             
-    total_pnl = total_val - 10000.0
+    total_pnl = total_val - 100.0
     pnl_sign = "+" if total_pnl >= 0 else "-"
     lines.append(f"\U0001f3e6 *Total Value:* `${_esc_code(f'{total_val:.2f}')}`")
     lines.append(f"\U0001f4c8 *All\\-Time PnL:* `{_esc_code(f'{pnl_sign}${abs(total_pnl):.2f}')}`")

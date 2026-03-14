@@ -353,10 +353,34 @@ def main() -> None:
     # Initialise SQLite schema (idempotent)
     db.init_db()
 
+    async def _post_init(app):
+        from telegram import BotCommand
+        commands = [
+            BotCommand("start", "Show main menu"),
+            BotCommand("help", "Show help message"),
+            BotCommand("my_wallets", "List your tracked wallets"),
+            BotCommand("history", "Show last 5 trades for a wallet"),
+            BotCommand("remove_wallet", "Stop tracking a wallet"),
+            BotCommand("paper_buy", "Buy paper shares (e.g. /paper_buy Up 10)"),
+            BotCommand("paper_sell", "Sell paper shares (e.g. /paper_sell Up 10)"),
+            BotCommand("sellall", "Sell ALL paper positions at once"),
+            BotCommand("portfolio", "View your paper trading portfolio"),
+            BotCommand("quick_trade", "Open Up/Down buy/sell buttons"),
+        ]
+        try:
+            await app.bot.set_my_commands(commands)
+            logger.info("Bot commands updated successfully.")
+        except Exception as e:
+            logger.warning("Could not set bot commands: %s", e)
+            
+        await _notify_startup(app)
+        asyncio.create_task(scanner.run_block_scanner(app))
+
     # Build the Application
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .post_init(_post_init)
         .build()
     )
 
@@ -393,30 +417,6 @@ def main() -> None:
 
     # ── Background polling job ─────────────────────────────────────────────
     # We remove the old REST API polling job and use the Web3 loop instead.
-    
-    # ── Send startup notification to all tracked users ────────────────────
-    async def _post_init(app):
-        from telegram import BotCommand
-        commands = [
-            BotCommand("start", "Show main menu"),
-            BotCommand("help", "Show help message"),
-            BotCommand("my_wallets", "List your tracked wallets"),
-            BotCommand("history", "Show last 5 trades for a wallet"),
-            BotCommand("remove_wallet", "Stop tracking a wallet"),
-            BotCommand("paper_buy", "Buy paper shares (e.g. /paper_buy Up 100)"),
-            BotCommand("paper_sell", "Sell paper shares (e.g. /paper_sell Up 100)"),
-            BotCommand("sellall", "Sell ALL paper positions at once"),
-            BotCommand("portfolio", "View your paper trading portfolio"),
-            BotCommand("quick_trade", "Open Up/Down buy/sell buttons"),
-        ]
-        try:
-            await app.bot.set_my_commands(commands)
-        except Exception as e:
-            logger.warning("Could not set bot commands: %s", e)
-            
-        await _notify_startup(app)
-        asyncio.create_task(scanner.run_block_scanner(app))
-    app.post_init = _post_init
 
     # ── Global error handler (logs all unhandled exceptions) ──────────────
     async def _error_handler(update, context) -> None:

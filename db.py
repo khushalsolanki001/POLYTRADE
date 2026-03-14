@@ -60,7 +60,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS paper_users (
                 user_id    INTEGER PRIMARY KEY,
-                balance    REAL NOT NULL DEFAULT 10000.0,
+                balance    REAL NOT NULL DEFAULT 100.0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -187,7 +187,7 @@ def count_wallets_for_user(user_id: int) -> int:
 #  Paper Trading Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def init_paper_user(user_id: int, starting_balance: float = 10000.0) -> None:
+def init_paper_user(user_id: int, starting_balance: float = 100.0) -> None:
     """Ensure a paper trading user exists."""
     with _connect() as conn:
         conn.execute("""
