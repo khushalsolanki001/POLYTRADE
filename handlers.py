@@ -1448,20 +1448,45 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     """
     db.init_paper_user(user_id)
 
-    market, mode = await _get_target_market(slug_override)
+    positions = db.get_all_paper_positions(user_id)
+    target_pos = None
+
+    if slug_override:
+        for p in positions:
+            if p["market_slug"] == slug_override and p["outcome"].lower() == outcome.lower():
+                target_pos = p
+                break
+    else:
+        matches = [p for p in positions if p["outcome"].lower() == outcome.lower()]
+        if matches:
+            target_pos = matches[0]
+
+    if not target_pos:
+        return False, f"You don't own any shares of {_esc(outcome)}\\."
+
+    slug = target_pos["market_slug"]
+    actual_outcome = target_pos["outcome"]
+    mode = "specific"
+
+    market = None
+    api_url = GAMMA_API_URL.format(slug=slug)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(api_url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data and isinstance(data, list) and data[0].get("markets"):
+                    market = data[0]["markets"][0]
+
     if not market:
-        return False, "Could not find a valid BTC 5m market right now\\."
+        return False, "Could not load market data for your position\\."
 
     outcomes = json.loads(market.get("outcomes", "[]"))
     token_ids = json.loads(market.get("clobTokenIds", "[]"))
     gamma_prices = json.loads(market.get("outcomePrices", "[]"))
     
-    idx = _find_outcome_index(outcomes, outcome)
+    idx = _find_outcome_index(outcomes, actual_outcome)
     if idx is None:
         return False, f"Outcome not found\\. Available: {_esc(', '.join(outcomes))}"
-    
-    actual_outcome = outcomes[idx]
-    slug = market.get("slug", "unknown")
 
     # Get real-time CLOB BID price (what seller receives)
     price = None
@@ -1473,17 +1498,15 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
                 price_source = "clob"
     
     if price is None:
-        gamma_price = float(gamma_prices[idx]) if gamma_prices and idx < len(gamma_prices) else 0
-        if 0 < gamma_price < 1:
+        gamma_price = float(gamma_prices[idx]) if gamma_prices and idx < len(gamma_prices) else -1
+        if 0 <= gamma_price <= 1:
             price = gamma_price
+            if price == 1.0 or price == 0.0:
+                price_source = "resolved payout"
         else:
             price = 0
     
-    position = db.get_paper_position(user_id, slug, actual_outcome)
-    if not position or position["shares"] <= 0:
-        return False, f"You don't own any shares of {_esc(actual_outcome)}\\."
-
-    # If shares_to_sell is None, sell all
+    position = target_pos
     if shares_to_sell is None:
         shares_to_sell = position["shares"]
 
@@ -1504,7 +1527,14 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     balance_str = f"{(balance + proceeds):.2f}"
     price_str = f"{price:.4f}"
     shares_str_fmt = f"{shares_to_sell:.2f}"
-    source_note = " \\(CLOB live\\)" if price_source == "clob" else " \\(Gamma est\\)"
+    
+    if price_source == "clob":
+        source_note = " \\(CLOB live\\)"
+    elif price_source == "resolved payout":
+        source_note = " \\(Resolved payout\\)"
+    else:
+        source_note = " \\(Gamma est\\)"
+
     window_text = _format_window_from_slug(slug)
     event_url = f"{TARGET_EVENT_URL_BASE}-{slug.split('-')[-1]}" if slug != "unknown" else TARGET_EVENT_URL_BASE
     
@@ -1602,7 +1632,7 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
                                 # Fallback to Gamma
                                 if price is None and gamma_prices_list and idx < len(gamma_prices_list):
                                     gp = float(gamma_prices_list[idx])
-                                    if 0 < gp < 1:
+                                    if 0 <= gp <= 1:
                                         price = gp
             except Exception:
                 pass
