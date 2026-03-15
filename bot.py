@@ -111,6 +111,7 @@ from telegram.constants import ParseMode
 import db
 import api
 import scanner
+import ml_signals
 from handlers import (
     cmd_start,
     cmd_help,
@@ -375,6 +376,10 @@ def main() -> None:
             
         await _notify_startup(app)
         asyncio.create_task(scanner.run_block_scanner(app))
+        # Start ML 5-minute BTC Up/Down signal loop in the background.
+        # This uses the trained XGBoost model to send one signal per 5-minute
+        # window to all tracked chats.
+        asyncio.create_task(ml_signals.run_ml_signal_loop(app))
 
     # Build the Application
     app = (
