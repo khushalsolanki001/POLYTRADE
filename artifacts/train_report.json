@@ -1,0 +1,56 @@
+{
+  "metrics": {
+    "accuracy": 0.8443830570902394,
+    "precision_up": 0.8460949464012251,
+    "recall_up": 0.8437690897984117,
+    "roc_auc": 0.9219254331040705,
+    "log_loss": 0.35727890663474265,
+    "confusion_matrix": [
+      [
+        5479,
+        1005
+      ],
+      [
+        1023,
+        5525
+      ]
+    ]
+  },
+  "simulated_trading": {
+    "num_trades": 5612,
+    "win_rate": 0.887384176764077,
+    "avg_profit": 0.3858677222157386,
+    "cum_return": 2165.4896570747255,
+    "max_drawdown": -2.0080640866540307
+  },
+  "rows_total": 52128,
+  "rows_train": 39096,
+  "rows_test": 13032,
+  "feature_columns": [
+    "mom_1m",
+    "mom_2m",
+    "mom_3m",
+    "mom_4m",
+    "up_count_4",
+    "down_count_4",
+    "max_up_streak_4",
+    "max_down_streak_4",
+    "max_drawup_4",
+    "max_drawdown_4",
+    "range_4m",
+    "ret_std_4m",
+    "vol_sum_4m",
+    "vol_rel_4m",
+    "taker_buy_ratio_4m",
+    "body_range_ratio_mean_4m",
+    "wick_body_ratio_mean_4m",
+    "direction_changes_4m",
+    "lag_ret_prev1",
+    "lag_ret_prev2",
+    "ret_1_to_2",
+    "ret_2_to_3",
+    "ret_3_to_4",
+    "yes_price_proxy"
+  ],
+  "model_path": "artifacts\\btc_5min_momentum_xgb.json"
+}
