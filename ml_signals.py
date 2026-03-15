@@ -104,6 +104,57 @@ def _build_single_window_features(
     return window_start, feats, start_price
 
 
+async def generate_single_signal_text() -> str:
+    """
+    Generate a one-off ML signal string using the latest completed 5-minute
+    Binance window. This is used by a Telegram command so you can see what
+    the model is thinking on-demand, even if the background loop is failing.
+    """
+    cfg = LiveConfig()
+    if not cfg.model_path.exists():
+        return "ML error: trained model file not found on disk."
+
+    try:
+        df_1m = _fetch_recent_klines(limit=10)
+    except Exception as e:
+        logger.error("Error fetching Binance klines for single signal: %s", e)
+        return f"ML error: could not fetch Binance data: {e}"
+
+    res = _build_single_window_features(df_1m, cfg.window_minutes)
+    if res is None:
+        return "ML info: not enough 1m candles yet for a full 5-minute window."
+
+    window_start, feats, start_price = res
+
+    try:
+        model = _load_model(str(cfg.model_path))
+    except Exception as e:
+        logger.error("Error loading model for single signal: %s", e)
+        return f"ML error: could not load model: {e}"
+
+    feature_cols = sorted(feats.keys())
+    x = np.array([[feats[c] for c in feature_cols]], dtype=float)
+    prob_up = float(model.predict_proba(x)[0, 1])
+
+    fair_price = 0.5
+    edge = prob_up - fair_price
+    direction = "UP" if prob_up >= 0.5 else "DOWN"
+
+    ts_str = window_start.strftime("%Y-%m-%d %H:%M UTC")
+    # For Polymarket-style reasoning, the 5-minute "target" is the
+    # start snapshot price: the market resolves Up if final price
+    # >= this level, Down otherwise.
+    lines = [
+        "BTC 5-minute ML snapshot",
+        f"Window: {ts_str}",
+        f"Target (5m start price): {start_price:,.2f} USDT",
+        f"Model P(Up >= target): {prob_up:.3f}",
+        f"Edge vs 50/50: {edge:.3f}",
+        f"Direction: {direction} (vs target)",
+    ]
+    return "\n".join(lines)
+
+
 async def run_ml_signal_loop(app: Application) -> None:
     """
     Background loop that, every ~30s, looks at the latest 5-minute BTC window,
@@ -184,13 +235,16 @@ async def run_ml_signal_loop(app: Application) -> None:
         buy_yes = prob_up >= cfg.prob_threshold and edge >= cfg.edge_buffer
 
         ts_str = window_start.strftime("%Y-%m-%d %H:%M UTC")
+        # In Polymarket 5m BTC Up/Down, the "target" is the start snapshot
+        # level (e.g. 71,500). We approximate that with the Binance 1m
+        # close at the start of the window.
         lines = [
             "BTC 5-minute ML signal",
             f"Window: {ts_str}",
-            f"Start price (Binance): {start_price:,.2f} USDT",
-            f"Model P(Up): {prob_up:.3f}",
+            f"Target (5m start price): {start_price:,.2f} USDT",
+            f"Model P(Up >= target): {prob_up:.3f}",
             f"Edge vs 50/50: {edge:.3f}",
-            f"Direction: {direction}",
+            f"Direction: {direction} (vs target)",
         ]
 
         if buy_yes:
