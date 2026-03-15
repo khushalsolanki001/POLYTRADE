@@ -1510,10 +1510,12 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     if idx is None:
         return False, f"Outcome not found\\. Available: {_esc(', '.join(outcomes))}"
 
+    tradeable = _is_market_tradeable(market)
+
     # Get real-time CLOB BID price (what seller receives)
     price = None
     price_source = "gamma"
-    if token_ids and idx < len(token_ids):
+    if tradeable and token_ids and idx < len(token_ids):
         async with aiohttp.ClientSession() as session:
             price = await _get_clob_price(session, token_ids[idx], "buy")
             if price is not None:
@@ -1521,12 +1523,19 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     
     if price is None:
         gamma_price = float(gamma_prices[idx]) if gamma_prices and idx < len(gamma_prices) else -1
-        if 0 <= gamma_price <= 1:
-            price = gamma_price
-            if price == 1.0 or price == 0.0:
+        if not tradeable:
+            if gamma_price in (0.0, 1.0):
+                price = gamma_price
                 price_source = "resolved payout"
+            else:
+                return False, "This market has ended and is awaiting final resolution\\."
         else:
-            price = 0
+            if 0 <= gamma_price <= 1:
+                price = gamma_price
+                if price in (0.0, 1.0):
+                    price_source = "resolved payout"
+            else:
+                price = 0
     
     position = target_pos
     if shares_to_sell is None:
@@ -1634,6 +1643,7 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
             # Try to get live BID price from CLOB
             price = None
             price_source = "gamma"
+            tradeable = True
             try:
                 api_url = GAMMA_API_URL.format(slug=slug)
                 async with session.get(api_url) as resp:
@@ -1641,27 +1651,38 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
                         data = await resp.json()
                         if data and isinstance(data, list) and data[0].get("markets"):
                             market = data[0]["markets"][0]
+                            tradeable = _is_market_tradeable(market)
                             outcomes_list = json.loads(market.get("outcomes", "[]"))
                             token_ids = json.loads(market.get("clobTokenIds", "[]"))
                             gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
                             idx = _find_outcome_index(outcomes_list, outcome)
                             if idx is not None:
                                 # Try CLOB BID price first
-                                if token_ids and idx < len(token_ids):
+                                if tradeable and token_ids and idx < len(token_ids):
                                     price = await _get_clob_price(session, token_ids[idx], "buy")
                                     if price is not None:
                                         price_source = "clob"
                                 # Fallback to Gamma
                                 if price is None and gamma_prices_list and idx < len(gamma_prices_list):
                                     gp = float(gamma_prices_list[idx])
-                                    if 0 <= gp <= 1:
+                                    if not tradeable:
+                                        if gp in (0.0, 1.0):
+                                            price = gp
+                                            price_source = "resolved payout"
+                                    elif 0 <= gp <= 1:
                                         price = gp
             except Exception:
                 pass
 
             if price is None:
-                price = avg_price  # worst case fallback: sell at your buy price
-                price_source = "fallback"
+                if not tradeable:
+                    title_short = (p["market_title"] or "Unknown")[:35]
+                    sold_lines.append(f"  • {_esc(outcome)} in `{_esc_code(title_short)}` — "
+                                      f"Skipped: Market ended, awaiting resolution")
+                    continue
+                else:
+                    price = avg_price  # worst case fallback: sell at your buy price
+                    price_source = "fallback"
 
             proceeds = shares * price
             pnl = (price - avg_price) * shares
