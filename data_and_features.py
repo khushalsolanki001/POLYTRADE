@@ -60,14 +60,13 @@ def _load_binance_file(path: Path) -> pd.DataFrame:
     """
     df = pd.read_csv(path, header=None, names=BINANCE_COLS)
 
-    # Some files can contain corrupted timestamps (e.g. far future years)
-    # which overflow pandas' nanosecond datetime range. We coerce those
-    # to NaT and drop them so they don't poison the dataset.
+    # These downloaded files use microsecond timestamps (e.g. 1756684800000000),
+    # not milliseconds. If we treat them as ms we end up in year 57637 and
+    # overflow pandas' datetime range. We therefore parse as microseconds.
     df["open_time"] = pd.to_numeric(df["open_time"], errors="coerce")
     df = df.dropna(subset=["open_time"])
-    df["open_time"] = df["open_time"].astype("int64")
     df["open_time"] = pd.to_datetime(
-        df["open_time"], unit="ms", utc=True, errors="coerce"
+        df["open_time"], unit="us", utc=True, errors="coerce"
     )
     df = df.dropna(subset=["open_time"])
     df.set_index("open_time", inplace=True)
