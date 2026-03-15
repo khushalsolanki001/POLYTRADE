@@ -1225,6 +1225,7 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
         outcome_key = parts[1]  # "Up", "Down", or "all"
         amount_key = parts[2]   # "all" or a number
 
+        slug_override_val = None
         if outcome_key == "all":
             # Sell ALL positions
             ok, message = await _paper_sellall_core(user_id)
@@ -1232,7 +1233,27 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
             # Sell all shares of a specific outcome
             slug_override_val = amount_key if amount_key != "all" else None
             ok, message = await _paper_sell_core(user_id, outcome_key, None, slug_override_val)
-        await query.edit_message_text(message, parse_mode="MarkdownV2")
+            
+        if slug_override_val:
+            # Target explicit slug (usually from a buy receipt). Remove the inline button then send a new message.
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=message, parse_mode="MarkdownV2")
+            except Exception as fmt_err:
+                logger.warning("MarkdownV2 failed sending sell receipt: %s", fmt_err)
+                plain = message.replace("*", "").replace("`", "").replace("\\", "")
+                await context.bot.send_message(chat_id=query.message.chat_id, text=plain)
+        else:
+            # Invoked from the general Quick Trade Menu (no slug). Just edit the menu.
+            try:
+                await query.edit_message_text(message, parse_mode="MarkdownV2")
+            except Exception as fmt_err:
+                logger.warning("MarkdownV2 failed in quick trade sell: %s", fmt_err)
+                plain = message.replace("*", "").replace("`", "").replace("\\", "")
+                await query.edit_message_text(plain)
         return
 
     # ── Buy button (qbuy:outcome:amount) ──
