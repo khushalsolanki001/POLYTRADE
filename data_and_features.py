@@ -59,7 +59,17 @@ def _load_binance_file(path: Path) -> pd.DataFrame:
     to UTC datetime index, and ensure numeric OHLCV columns.
     """
     df = pd.read_csv(path, header=None, names=BINANCE_COLS)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+
+    # Some files can contain corrupted timestamps (e.g. far future years)
+    # which overflow pandas' nanosecond datetime range. We coerce those
+    # to NaT and drop them so they don't poison the dataset.
+    df["open_time"] = pd.to_numeric(df["open_time"], errors="coerce")
+    df = df.dropna(subset=["open_time"])
+    df["open_time"] = df["open_time"].astype("int64")
+    df["open_time"] = pd.to_datetime(
+        df["open_time"], unit="ms", utc=True, errors="coerce"
+    )
+    df = df.dropna(subset=["open_time"])
     df.set_index("open_time", inplace=True)
     df.sort_index(inplace=True)
 
@@ -206,8 +216,11 @@ def build_5min_dataset(df_1m: pd.DataFrame) -> pd.DataFrame:
       - label = 1 if last close >= first close else 0
       - features come only from the first 4 candles (early-window momentum)
     """
+    if df_1m.empty:
+        return pd.DataFrame()
+
     df = df_1m.copy()
-    df["window_start"] = df.index.floor("5T")
+    df["window_start"] = df.index.floor("5min")
 
     rows = []
     for window_start, group in df.groupby("window_start"):
@@ -233,8 +246,9 @@ def build_5min_dataset(df_1m: pd.DataFrame) -> pd.DataFrame:
         rows.append(feats)
 
     out = pd.DataFrame(rows)
-    out.set_index("window_start", inplace=True)
-    out.sort_index(inplace=True)
+    if not out.empty:
+        out.set_index("window_start", inplace=True)
+        out.sort_index(inplace=True)
     return out
 
 
@@ -255,6 +269,10 @@ def main():
     df_1m = pd.concat(dfs).sort_index()
     df_1m = df_1m[~df_1m.index.duplicated(keep="first")]
     logger.info("Total 1m candles after concat: %d", len(df_1m))
+
+    if df_1m.empty:
+        logger.error("No valid 1m candles after cleaning timestamps; nothing to build.")
+        return
 
     logger.info("Building 5-minute windows and features…")
     dataset = build_5min_dataset(df_1m)
