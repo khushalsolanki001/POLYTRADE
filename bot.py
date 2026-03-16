@@ -98,13 +98,12 @@ if sys.stderr.encoding.lower() != "utf-8":
 
 
 from dotenv import load_dotenv
-from telegram import Bot, Update
+from telegram import Bot
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ContextTypes,
     filters,
 )
 from telegram.constants import ParseMode
@@ -112,7 +111,6 @@ from telegram.constants import ParseMode
 import db
 import api
 import scanner
-import ml_signals
 from handlers import (
     cmd_start,
     cmd_help,
@@ -342,20 +340,6 @@ async def _notify_startup(app) -> None:
             logger.warning("Could not send startup ping to %s: %s", cid, exc)
 
 
-async def cmd_ml_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    On-demand command so you can see exactly what the ML model thinks
-    about the most recent completed 5-minute BTC window, and debug any
-    issues directly from Telegram.
-    """
-    try:
-        text = await ml_signals.generate_single_signal_text()
-    except Exception as exc:
-        logger.error("Error generating ML signal: %s", exc, exc_info=True)
-        text = f"ML error: {exc}"
-    await update.effective_chat.send_message(text=text)
-
-
 def main() -> None:
     if not BOT_TOKEN:
         logger.critical(
@@ -391,10 +375,6 @@ def main() -> None:
             
         await _notify_startup(app)
         asyncio.create_task(scanner.run_block_scanner(app))
-        # Start ML 5-minute BTC Up/Down signal loop in the background.
-        # This uses the trained XGBoost model to send one signal per 5-minute
-        # window to all tracked chats.
-        asyncio.create_task(ml_signals.run_ml_signal_loop(app))
 
     # Build the Application
     app = (
@@ -420,7 +400,6 @@ def main() -> None:
     app.add_handler(CommandHandler("sellall",        cmd_sellall))
     app.add_handler(CommandHandler("portfolio",      cmd_portfolio))
     app.add_handler(CommandHandler("quick_trade",    cmd_quick_trade))
-    app.add_handler(CommandHandler("ml_signal",      cmd_ml_signal))
 
     # 3. Inline button callbacks
     app.add_handler(CallbackQueryHandler(callback_remove_wallet, pattern=r"^remove:"))
