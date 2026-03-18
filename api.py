@@ -222,3 +222,58 @@ def parse_market_id(trade: dict) -> str:
         or trade.get("marketSlug")
         or ""
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Crypto Price Markets
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_crypto_price_markets() -> list[dict[str, Any]]:
+    """
+    Fetch active 5-min and 15-min BTC/ETH/SOL markets from Gamma API.
+    Used by PolyProfitBot to identify current trading cycles.
+    """
+    # Search for markets matching 'Bitcoin Price', 'Ethereum Price', 'Solana Price'
+    # and look for 5/15 minute timeframes in the title.
+    url = f"{MARKETS_BASE_URL}?active=true&limit=100"
+    session = await get_session()
+    try:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                markets = await resp.json()
+                crypto_markets = []
+                for m in markets:
+                    title = m.get("question", "").lower()
+                    if any(coin in title for coin in ["bitcoin", "ethereum", "solana"]) and \
+                       ("5-minute" in title or "15-minute" in title or "5 minute" in title or "15 minute" in title):
+                        crypto_markets.append(m)
+                return crypto_markets
+            return []
+    except Exception as e:
+        logger.error(f"Error fetching crypto markets: {e}")
+        return []
+
+async def get_market_tokens(condition_id: str) -> dict[str, str]:
+    """
+    Fetch token IDs (asset_ids) for the YES and NO tokens of a given market.
+    Returns a dict: {"YES": "id1", "NO": "id2"}
+    """
+    session = await get_session()
+    try:
+        async with session.get(f"{MARKETS_BASE_URL}/{condition_id}") as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if isinstance(data, list) and data:
+                    data = data[0]
+                
+                tokens = {}
+                for t in data.get("tokens", []):
+                    outcome = t.get("outcome", "").upper()
+                    if outcome in ["YES", "UP"]:
+                        tokens["YES"] = t.get("token_id")
+                    elif outcome in ["NO", "DOWN"]:
+                        tokens["NO"] = t.get("token_id")
+                return tokens
+            return {}
+    except Exception as e:
+        logger.error(f"Error fetching tokens for market {condition_id}: {e}")
+        return {}
