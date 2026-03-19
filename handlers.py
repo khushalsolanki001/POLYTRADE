@@ -24,10 +24,10 @@ from telegram import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
-import aiohttp
+import aiohttp # type: ignore
 import json
 import re
-from telegram.ext import (
+from telegram.ext import ( # type: ignore
     ContextTypes,
     ConversationHandler,
     CommandHandler,
@@ -35,10 +35,10 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode # type: ignore
 
-import db
-import api
+import db # type: ignore
+import api # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,8 @@ def _build_trade_line(
     """
     title_line = ""
     if market_title:
-        truncated = market_title[:55] + ("\u2026" if len(market_title) > 55 else "")
+        trunc = str(market_title)
+        truncated = trunc[:55] + ("\u2026" if len(trunc) > 55 else "")
         title_line = f"\n    \u2022 {_esc(truncated)}"
 
     return (
@@ -135,10 +136,10 @@ def _build_trade_line(
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    db.upsert_user(user.id, user.username, update.effective_chat.id)
-
-    await update.message.reply_text(
-        f"\U0001f44b *Welcome to PolyTrack, {_esc(user.first_name)}\\!*\n\n"
+    if user:
+        db.upsert_user(user.id, user.username, update.effective_chat.id) # type: ignore
+        await update.message.reply_text( # type: ignore
+            f"\U0001f44b *Welcome to PolyTrack, {_esc(str(user.first_name))}\\!*\n\n"
         "I'm your personal Polymarket trade monitor\\. "
         "Add any public wallet address and I'll ping you the moment a trade lands\\.\n\n"
         "\U0001f50d *What I can do:*\n"
@@ -1687,10 +1688,11 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
                     price = avg_price  # worst case fallback: sell at your buy price
                     price_source = "fallback"
 
-            proceeds = shares * price
-            pnl = (price - avg_price) * shares
-            total_proceeds += proceeds
-            total_pnl += pnl
+            price_val = float(price if price is not None else p["avg_price"])
+            proceeds = float(shares) * price_val
+            pnl = (price_val - float(p["avg_price"])) * float(shares)
+            total_proceeds += float(proceeds)
+            total_pnl += float(pnl)
 
             # Remove position from DB
             db.remove_paper_position(p["id"])
@@ -1705,10 +1707,10 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
             )
 
     # Update balance
-    new_balance = balance + total_proceeds
+    new_balance = float(balance) + float(total_proceeds)
     db.update_paper_balance(user_id, new_balance)
 
-    total_pnl_sign = "+" if total_pnl >= 0 else "-"
+    total_pnl_sign = "+" if float(total_pnl) >= 0 else "-"
     msg_lines = [
         f"💣 *All Positions Sold\\!*\n",
         f"📦 *Positions closed:* {len(positions)}",
@@ -1872,7 +1874,7 @@ async def cmd_agent_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         plain = "Agent RESUMED." if new_state else "Agent PAUSED."
         await update.message.reply_text(plain)
 
-import chart
+import chart # type: ignore
 import os
 
 async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
