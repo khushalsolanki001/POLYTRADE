@@ -75,6 +75,18 @@ def init_db() -> None:
                 created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (user_id, market_slug, outcome)
             );
+
+            CREATE TABLE IF NOT EXISTS paper_trade_history (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                market_slug   TEXT NOT NULL,
+                outcome       TEXT NOT NULL,
+                buy_price     REAL NOT NULL,
+                sell_price    REAL NOT NULL,
+                shares        REAL NOT NULL,
+                pnl           REAL NOT NULL,
+                closed_at     TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
         conn.commit()
         logger.info("✅ Database initialised at '%s'", DB_PATH)
@@ -230,6 +242,24 @@ def remove_paper_position(position_id: int) -> None:
     """Remove a paper position (e.g., when shares hit 0)."""
     with _connect() as conn:
         conn.execute("DELETE FROM paper_positions WHERE id = ?", (position_id,))
+
+def add_trade_history(user_id: int, slug: str, outcome: str, buy_price: float, sell_price: float, shares: float, pnl: float) -> None:
+    """Records a closed trade into the history table."""
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO paper_trade_history 
+            (user_id, market_slug, outcome, buy_price, sell_price, shares, pnl)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, slug, outcome, buy_price, sell_price, shares, pnl))
+
+def get_trade_history(user_id: int) -> list[sqlite3.Row]:
+    """Retrieves all historical trades for a given user, ordered by closing time."""
+    with _connect() as conn:
+        return conn.execute("""
+            SELECT * FROM paper_trade_history 
+            WHERE user_id = ? 
+            ORDER BY closed_at ASC
+        """, (user_id,)).fetchall()
 
 def get_all_paper_positions(user_id: int) -> list[sqlite3.Row]:
     """Get all positions for a paper user."""
