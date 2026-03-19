@@ -447,8 +447,18 @@ def main() -> None:
     )
 
     # Cleanup after stop
-    asyncio.get_event_loop().run_until_complete(api.close_session())
-    logger.info("👋 Bot shut down gracefully.")
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            logger.info("👋 Closing active session asynchronously...")
+            loop.create_task(api.close_session())
+        else:
+            logger.info("👋 Closing session gracefully...")
+            asyncio.run(api.close_session())
+    except Exception as e:
+        logger.warning(f"Session cleanup suppressed error: {e}")
+        
+    logger.info("👋 Bot shut down successfully.")
 
 
 if __name__ == "__main__":

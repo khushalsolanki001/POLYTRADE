@@ -56,7 +56,7 @@ AGENT_POLL_SECONDS: int = int(os.getenv("AGENT_POLL_SECONDS", "30"))
 MAX_CONSECUTIVE_LOSSES = 4
 PAUSE_DURATION         = 600    # 10-min cool-down
 MAX_DAILY_LOSS_PCT     = 0.15
-STARTING_BALANCE       = 100.0
+STARTING_BALANCE       = 1000.0
 MIN_PRICE_SAMPLES      = 15     # need ~15 ticks (≈15s) before signal is valid
 
 # Window timing: only trade EARLY_ENTRY_SECS to LATE_ENTRY_SECS into a 5-min window
