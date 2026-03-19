@@ -367,14 +367,9 @@ async def _attempt_sell(bot, slug: str, outcome: str,
     if ok:
         # Parse sell price from the message
         sell_price = buy_price  # fallback
-        m = re.search(r"@\s*\$([0-9.]+)", msg_str)
-        if m:
-            try:
-                sell_price = float(m.group(1))
-            except ValueError:
-                pass
-        # Also try: "exit price" or the "@ $X.XXXX" pattern in our own message template
-        if sell_price == buy_price:
+        m = re.search(r"Exit price[^0-9]+([0-9.]+)", msg_str, flags=re.IGNORECASE)
+        if not m:
+            m = re.search(r"@\s*\$([0-9.]+)", msg_str)
             m2 = re.search(r"Shares.*?@\s*\$([0-9.]+)", msg_str)
             if m2:
                 try:
@@ -637,7 +632,7 @@ async def _cycle(bot) -> None:
 
     if ok and slug:
         fill_price = 0.5
-        m = re.search(r"Buy price[:\s*]*\$?([0-9.]+)", str(msg).replace("\\", ""))
+        m = re.search(r"Buy price[^0-9]+([0-9.]+)", str(msg).replace("\\", ""), flags=re.IGNORECASE)
         if m:
             try:
                 fill_price = float(m.group(1))
