@@ -57,3 +57,6 @@ desktop.ini
 .coverage
 htmlcov/
 temp_repos/4coinsbot/
+temp_repos/mlmodelpoly/
+temp_repos/polyrec/
+temp_repos/polyterminal/
