@@ -131,6 +131,7 @@ from handlers import (
     callback_quick_trade,
     cmd_agent_status,
     cmd_agent_toggle,
+    cmd_chart,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,6 +372,7 @@ def main() -> None:
             BotCommand("quick_trade", "Open Up/Down buy/sell buttons"),
             BotCommand("agent_status", "View the auto-trading agent status"),
             BotCommand("agent_toggle", "Pause or resume the auto-trading agent"),
+            BotCommand("chart", "Display PnL history graph"),
         ]
         try:
             await app.bot.set_my_commands(commands)
@@ -409,6 +411,8 @@ def main() -> None:
     app.add_handler(CommandHandler("quick_trade",    cmd_quick_trade))
     app.add_handler(CommandHandler("agent_status",   cmd_agent_status))
     app.add_handler(CommandHandler("agent_toggle",   cmd_agent_toggle))
+    app.add_handler(CommandHandler("chart",          cmd_chart))
+    app.add_handler(CommandHandler("pnl",            cmd_chart))
 
     # 3. Inline button callbacks
     app.add_handler(CallbackQueryHandler(callback_remove_wallet, pattern=r"^remove:"))
