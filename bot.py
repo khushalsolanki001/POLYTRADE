@@ -380,7 +380,7 @@ def main() -> None:
             
         await _notify_startup(app)
         asyncio.create_task(scanner.run_block_scanner(app))
-        asyncio.create_task(agent.start(app))
+        await agent.start(app)
         logger.info("🤖 PolyAgent background tasks scheduled.")
 
     # Build the Application
