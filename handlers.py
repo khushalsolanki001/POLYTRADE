@@ -1554,6 +1554,9 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     else:
         db.upsert_paper_position(user_id, slug, position["market_title"], actual_outcome, rem_shares, position["avg_price"])
 
+    pnl = (price - position["avg_price"]) * shares_to_sell
+    db.add_trade_history(user_id, slug, actual_outcome, position["avg_price"], price, shares_to_sell, pnl)
+
     proceeds_str = f"{proceeds:.2f}"
     balance_str = f"{(balance + proceeds):.2f}"
     price_str = f"{price:.4f}"
@@ -1691,6 +1694,7 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
 
             # Remove position from DB
             db.remove_paper_position(p["id"])
+            db.add_trade_history(user_id, slug, outcome, avg_price, price, shares, pnl)
 
             pnl_sign = "+" if pnl >= 0 else "-"
             title_short = (p["market_title"] or "Unknown")[:35]
