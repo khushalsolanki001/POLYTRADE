@@ -1802,3 +1802,68 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Error formatting portfolio view: {e}")
         await sent.edit_text("Error formatting portfolio view\\.", parse_mode="MarkdownV2")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Auto-Trading Agent Commands  (/agent_status, /agent_toggle)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_agent_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /agent_status — Show real-time status of the auto-trading agent.
+    Only the owner (AGENT_CHAT_ID) can use this command.
+    """
+    import os as _os
+    agent_chat_id = int(_os.getenv("AGENT_CHAT_ID", "0"))
+    chat_id = update.effective_chat.id
+
+    if agent_chat_id != 0 and chat_id != agent_chat_id:
+        await update.message.reply_text(
+            "⛔ This command is only accessible to the bot owner\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    import agent as _agent
+    status_msg = _agent.get_status_message()
+    try:
+        await update.message.reply_text(status_msg, parse_mode="MarkdownV2")
+    except Exception as exc:
+        logger.warning("MarkdownV2 failed in agent_status: %s", exc)
+        plain = status_msg.replace("*", "").replace("`", "").replace("\\", "")
+        await update.message.reply_text(plain)
+
+
+async def cmd_agent_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /agent_toggle — Pause or resume the auto-trading agent.
+    Only the owner (AGENT_CHAT_ID) can use this command.
+    """
+    import os as _os
+    agent_chat_id = int(_os.getenv("AGENT_CHAT_ID", "0"))
+    chat_id = update.effective_chat.id
+
+    if agent_chat_id != 0 and chat_id != agent_chat_id:
+        await update.message.reply_text(
+            "⛔ This command is only accessible to the bot owner\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    import agent as _agent
+    new_state = _agent.toggle()
+    state_text = "▶️ *RESUMED*" if new_state else "⏸ *PAUSED*"
+    hint = (
+        "_The agent will enter a trade on the next strong signal\\._"
+        if new_state else
+        "_The agent will not place new trades until you resume it\\._"
+    )
+    try:
+        await update.message.reply_text(
+            f"🤖 Agent {state_text}\n\n{hint}",
+            parse_mode="MarkdownV2",
+        )
+    except Exception as exc:
+        logger.warning("MarkdownV2 failed in agent_toggle: %s", exc)
+        plain = "Agent RESUMED." if new_state else "Agent PAUSED."
+        await update.message.reply_text(plain)

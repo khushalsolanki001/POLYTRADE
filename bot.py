@@ -111,6 +111,7 @@ from telegram.constants import ParseMode
 import db
 import api
 import scanner
+import agent
 from handlers import (
     cmd_start,
     cmd_help,
@@ -128,6 +129,8 @@ from handlers import (
     cmd_portfolio,
     cmd_quick_trade,
     callback_quick_trade,
+    cmd_agent_status,
+    cmd_agent_toggle,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -366,6 +369,8 @@ def main() -> None:
             BotCommand("sellall", "Sell ALL paper positions at once"),
             BotCommand("portfolio", "View your paper trading portfolio"),
             BotCommand("quick_trade", "Open Up/Down buy/sell buttons"),
+            BotCommand("agent_status", "View the auto-trading agent status"),
+            BotCommand("agent_toggle", "Pause or resume the auto-trading agent"),
         ]
         try:
             await app.bot.set_my_commands(commands)
@@ -375,6 +380,8 @@ def main() -> None:
             
         await _notify_startup(app)
         asyncio.create_task(scanner.run_block_scanner(app))
+        asyncio.create_task(agent.start(app))
+        logger.info("🤖 PolyAgent background tasks scheduled.")
 
     # Build the Application
     app = (
@@ -400,6 +407,8 @@ def main() -> None:
     app.add_handler(CommandHandler("sellall",        cmd_sellall))
     app.add_handler(CommandHandler("portfolio",      cmd_portfolio))
     app.add_handler(CommandHandler("quick_trade",    cmd_quick_trade))
+    app.add_handler(CommandHandler("agent_status",   cmd_agent_status))
+    app.add_handler(CommandHandler("agent_toggle",   cmd_agent_toggle))
 
     # 3. Inline button callbacks
     app.add_handler(CallbackQueryHandler(callback_remove_wallet, pattern=r"^remove:"))
