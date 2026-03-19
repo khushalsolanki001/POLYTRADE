@@ -1,23 +1,19 @@
 """
-agent.py — Autonomous BTC 5-Minute Paper Trading Agent  (v3 — Production-grade)
+agent.py — Autonomous BTC 5-Minute Paper Trading Agent  (v4 — HARD TRADING / HFT)
 ================================================================================
 
 ARCHITECTURE:
   - Binance WS → real-time BTC price feed  (sub-second updates)
-  - Every AGENT_POLL_SECONDS:  evaluate momentum → place paper trade if signal is strong
-  - Resolution detection: when slug changes, auto-sell old position (with retry)
-  - All trades use the same paper-trading DB / buy/sell logic as the bot's /paper_buy
+  - Every 1s (AGENT_POLL_SECONDS): evaluate momentum & scalp exits
+  - FAST EXIT: Take Profit (+8%) and Stop Loss (-5%) triggers
+  - SIGNAL REVERSAL: Close position if momentum flips hard against us
+  - Dynamic Kelly Positioning: risk up to 10% of portfolio on high-edge signals
 
 PROFESSIONAL RULES:
   1. Combined momentum: 1-min AND 3-min must agree in direction
-  2. Window timing: only trade 60-210s into a 5-min window (avoid open/close volatility)
-  3. Min edge 3% (configurable) — below that, stay flat
-  4. Max 1 open position at a time — never stack positions
-  5. Kelly-fraction position sizing (capped at AGENT_TRADE_USD)
-  6. 4 consecutive losses → 10-min pause
-  7. Daily loss limit 15% → no more trades today
-  8. Sell retry: if market awaiting resolution, retry up to 5 times over 2 minutes
-  9. Orphan check on startup: if old positions exist in DB, re-register them in state
+  2. Aggressive Timing: enter 30s – 240s into the 5-min window
+  3. Scalping: Exit early if target profit or loss limit hit
+  4. Kelly-fraction position sizing (capped at 2x default or 10% balance)
 """
 
 import asyncio
@@ -27,45 +23,52 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 from zoneinfo import ZoneInfo
 
-import aiohttp
-import websockets
-from dotenv import load_dotenv
+import aiohttp # type: ignore
+import websockets # type: ignore
+from dotenv import load_dotenv # type: ignore
 
-import db
-from handlers import (
+import db # type: ignore
+from handlers import ( # type: ignore
     _paper_buy_core,
     _paper_sell_core,
     _get_target_market,
+    _get_clob_price,
     _format_5m_et_label,
     _esc,
     _esc_code,
 )
+
+# Constants for direct API access
+GAMMA_API_URL  = "https://gamma-api.polymarket.com/events?slug={slug}"
+CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 
 load_dotenv()
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 AGENT_USER_ID: int      = int(os.getenv("AGENT_USER_ID",      "999999"))
 _AGENT_CHAT_ID_ENV: int = int(os.getenv("AGENT_CHAT_ID",      "0"))
-AGENT_TRADE_USD: float  = float(os.getenv("AGENT_TRADE_USD",  "5"))
-AGENT_MIN_EDGE: float   = float(os.getenv("AGENT_MIN_EDGE",   "0.03"))   # 3% min
-AGENT_POLL_SECONDS: int = int(os.getenv("AGENT_POLL_SECONDS", "30"))
+AGENT_TRADE_USD: float  = float(os.getenv("AGENT_TRADE_USD",  "25"))
+AGENT_MIN_EDGE: float   = float(os.getenv("AGENT_MIN_EDGE",   "0.02"))   # 2% min (Aggressive)
+AGENT_POLL_SECONDS: int = int(os.getenv("AGENT_POLL_SECONDS", "1"))      # HARD TRADING: 1s poll
 
-MAX_CONSECUTIVE_LOSSES = 4
-PAUSE_DURATION         = 600    # 10-min cool-down
-MAX_DAILY_LOSS_PCT     = 0.15
+MAX_CONSECUTIVE_LOSSES = 5
+PAUSE_DURATION         = 300    # 5-min cool-down
+MAX_DAILY_LOSS_PCT     = 0.20
 STARTING_BALANCE       = 1000.0
-MIN_PRICE_SAMPLES      = 15     # need ~15 ticks (≈15s) before signal is valid
+MIN_PRICE_SAMPLES      = 10     # faster warmup
 
-# Window timing: only trade EARLY_ENTRY_SECS to LATE_ENTRY_SECS into a 5-min window
-EARLY_ENTRY_SECS = 45    # don't enter in first 45s (allow price to establish)
-LATE_ENTRY_SECS  = 210   # don't enter after 3:30 into the window (too close to close)
+# Professional Exit Rules (Scalping)
+TAKE_PROFIT_PCT = 0.08  # +8% ROI → Close early
+STOP_LOSS_PCT   = 0.05  # -5% ROI → Close early
+REVERSAL_EXIT   = True  # Exit if signal flips against us
+KELLY_FRACTION  = 0.10  # Risk 10% of portfolio max per trade (Kelly-lite)
+
 WINDOW_SECS      = 300
-
 SELL_RETRY_MAX   = 6     # max retries for sell
-SELL_RETRY_DELAY = 20    # seconds between retries
+SELL_RETRY_DELAY = 10    # seconds between retries (faster)
 
 BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@ticker"
 USER_TZ        = ZoneInfo("Asia/Kolkata")
@@ -183,20 +186,15 @@ def _price_n_secs_ago(secs: float) -> Optional[float]:
     target = _s.prices[-1][0] - secs
     for t, p in reversed(_s.prices):
         if t <= target:
-            return p
-    return _s.prices[0][1]
+            return float(p)
+    return float(_s.prices[0][1])
 
 def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Returns (momentum_p, edge, raw_factor) or (None, None, None) if insufficient data.
-
-    Combined rule: 1-min and 3-min momentum must AGREE in direction.
-    If they disagree → return None (no trade).
-    """
+    """Returns (momentum_p, edge, raw_factor). 1-min and 3-min must AGREE."""
     if len(_s.prices) < MIN_PRICE_SAMPLES:
         return None, None, None
 
-    now_p = _s.prices[-1][1]
+    now_p = float(_s.prices[-1][1])
     p1    = _price_n_secs_ago(60)
     p3    = _price_n_secs_ago(180)
 
@@ -206,11 +204,8 @@ def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]
     mom1 = (now_p - p1) / p1
     mom3 = (now_p - p3) / p3
 
-    # ── Professional rule: 1-min and 3-min must agree ────────────────────────
     if (mom1 >= 0) != (mom3 >= 0):
-        logger.info("[AGENT] Signal conflict: mom1=%.4f%% mom3=%.4f%% — no trade",
-                    mom1 * 100, mom3 * 100)
-        return None, None, float(mom1)  # return raw_factor for logging
+        return None, None, float(mom1)
 
     factor     = (mom1 * 12) + (mom3 * 8)
     momentum_p = max(0.05, min(0.95, 0.5 + factor))
@@ -223,20 +218,11 @@ def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]
 
 async def _send(bot, text: str) -> None:
     chat_id = _resolve_chat_id()
-    if not chat_id:
-        logger.info("[AGENT] (No chat_id — skipping notification)")
-        return
+    if not chat_id: return
     try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="MarkdownV2",
-            disable_web_page_preview=True,
-        )
-    except Exception as primary_e:
-        # MarkdownV2 failed, strip only formatting characters, NOT punctuation like . ! -
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+    except Exception:
         try:
-            logger.debug(f"[AGENT] MarkdownV2 failed: {primary_e}. Sending plain text.")
             plain = re.sub(r"[*_`\[\]()~>#+=|\\]", "", text)
             await bot.send_message(chat_id=chat_id, text=plain)
         except Exception as e2:
@@ -247,185 +233,54 @@ def _fmt_startup(balance: float) -> str:
     btc = _btc_now_str()
     src = f"`{_AGENT_CHAT_ID_ENV}`" if _AGENT_CHAT_ID_ENV else "auto\\-detected"
     return (
-        "🤖 *PolyAgent v3 — ONLINE\\!*\n\n"
+        "🤖 *PolyAgent v4 — ONLINE (HARD TRADING)*\n\n"
         f"💵 *Balance:* `${_esc_code(f'{balance:.2f}')}`\n"
         f"⚡ *Min edge:* `{_esc_code(f'{AGENT_MIN_EDGE*100:.0f}%')}`  "
-        f"\\|  *Trade size:* `${_esc_code(f'{AGENT_TRADE_USD:.0f}')}`  "
+        f"\\|  *Trade:* `Kelly 10%`  "
         f"\\|  *Poll:* `{AGENT_POLL_SECONDS}s`\n"
-        f"₿ *BTC now:* `{_esc_code(btc)}`\n"
-        f"📬 *Chat:* {src}\n"
-        f"⏰ `{_esc_code(_now_ist_str())}`\n\n"
-        "📐 *Strategy rules:*\n"
-        "• 1\\-min \\+ 3\\-min momentum must *agree*\n"
-        "• Only trade 45s–3:30 into the window\n"
-        "• Max 1 position at a time\n"
-        "• 4 losses in a row → 10 min pause"
-    )
-
-
-def _fmt_buy_alert(outcome: str, fill_price: float, edge: float,
-                   momentum_p: float, slug: str, mom1: float, mom3: float) -> str:
-    direction_emoji = "🟢" if outcome.lower() == "up" else "🔴"
-    balance  = db.get_paper_balance(AGENT_USER_ID)
-    btc_now  = _btc_now()
-    shares   = AGENT_TRADE_USD / fill_price if fill_price > 0 else 0
-    win_target = fill_price + 0.10   # rough target: +10c = nice pnl
-    win_pnl    = (win_target - fill_price) * shares
-
-    # Window timing
-    window_end_str = ""
-    try:
-        slug_ts   = int(slug.split("-")[-1])
-        end_utc   = datetime.fromtimestamp(slug_ts + WINDOW_SECS, tz=timezone.utc)
-        end_ist   = end_utc.astimezone(USER_TZ).strftime("%I:%M %p IST").lstrip("0")
-        secs_left = (end_utc - _now_utc()).total_seconds()
-        window_end_str = f"\n⌛ *Window ends:* `{_esc_code(end_ist)}`  \\(~`{int(secs_left)}s` left\\)"
-    except Exception:
-        pass
-
-    return (
-        f"🤖 *AUTO BUY — {direction_emoji} {_esc(outcome.upper())}*\n\n"
-        f"📊 *Market:* BTC {_esc(_et_label(slug))}\n"
-        f"💰 *Entry price:* `${_esc_code(f'{fill_price:.4f}')}`"
-        f"   \\|   *Size:* `${_esc_code(f'{AGENT_TRADE_USD:.0f}')}`\n"
-        f"📦 *Shares:* `{_esc_code(f'{shares:.2f}')}`\n"
-        f"₿ *BTC spot:* `{_esc_code(f'${btc_now:,.2f}')}`\n"
-        f"⚡ *Momentum:* 1m:`{_esc_code(f'{mom1*100:+.2f}%')}` "
-        f"3m:`{_esc_code(f'{mom3*100:+.2f}%')}` "
-        f"edge:`{_esc_code(f'{edge*100:.2f}%')}`\n"
-        f"📈 *Confidence:* `{_esc_code(f'{momentum_p*100:.1f}%')}`"
-        f"{window_end_str}\n"
-        f"💵 *Balance after:* `${_esc_code(f'{balance:.2f}')}`\n"
+        f"📈 *Take Profit:* `+8%`  \\|  *Stop Loss:* `-5%`\n"
+        f"₿ *BTC now:* `{_esc_code(btc)}`  \\|  📬 {src}\n"
         f"⏰ `{_esc_code(_now_ist_str())}`"
     )
 
+def _fmt_buy_alert(outcome: str, fill_price: float, edge: float,
+                   momentum_p: float, slug: str, mom1: float, mom3: float, trade_usd: float) -> str:
+    direction_emoji = "🟢" if outcome.lower() == "up" else "🔴"
+    balance  = db.get_paper_balance(AGENT_USER_ID)
+    btc_now  = _btc_now()
+    shares   = trade_usd / fill_price if fill_price > 0 else 0
+    return (
+        f"🤖 *AUTO BUY — {direction_emoji} {_esc(outcome.upper())}*\n\n"
+        f"📊 *Market:* BTC {_esc(_et_label(slug))}\n"
+        f"💰 *Entry:* `${_esc_code(f'{fill_price:.4f}')}` \\| *Amt:* `${_esc_code(f'{trade_usd:.2f}')}`\n"
+        f"📦 *Shares:* `{_esc_code(f'{shares:.2f}')}` \\| ₿ BTC: `{_esc_code(f'${btc_now:,.2f}')}`\n"
+        f"⚡ *Mom:* 1m `{_esc_code(f'{mom1*100:+.2f}%')}` 3m `{_esc_code(f'{mom3*100:+.2f}%')}`\n"
+        f"📈 *Edge:* `{_esc_code(f'{edge*100:.2f}%')}` \\| *Conf:* `{_esc_code(f'{momentum_p*100:.1f}%')}`\n"
+        f"💵 *New Balance:* `${_esc_code(f'{balance:.2f}')}`\n"
+        f"⏰ `{_esc_code(_now_ist_str())}`"
+    )
 
 def _fmt_sell_alert(outcome: str, sell_price: float, buy_price: float,
                     shares: float, pnl: float, slug: str,
                     btc_entry: float, btc_exit: float, entry_ist: str) -> str:
     win         = pnl >= 0
-    result_text = "✅ *WIN*" if win else "❌ *LOSS*"
+    result_text = "✅ *WIN (TP)*" if win and pnl > 0 else ("🛑 *STOP LOSS*" if pnl < 0 else "⚖️ *NEUTRAL*")
     pnl_sign    = "+" if win else "\\-"
-    balance     = db.get_paper_balance(AGENT_USER_ID)
     roi         = (pnl / (buy_price * shares) * 100) if (buy_price * shares > 0) else 0
-    btc_change  = ((btc_exit - btc_entry) / btc_entry * 100) if btc_entry > 0 else 0
-    btc_sign    = "+" if btc_change >= 0 else "\\-"
-
+    balance     = db.get_paper_balance(AGENT_USER_ID)
     return (
         f"🤖 *AUTO SELL — {result_text}*\n\n"
-        f"📊 *Market:* BTC {_esc(_et_label(slug))}\n"
-        f"🎯 *Direction:* *{_esc(outcome.upper())}*\n\n"
-        f"📈 *Trade Summary:*\n"
-        f"  Entry: `${_esc_code(f'{buy_price:.4f}')}`  →  Exit: `${_esc_code(f'{sell_price:.4f}')}`\n"
-        f"  Shares: `{_esc_code(f'{shares:.2f}')}`\n"
-        f"  P&L: `{pnl_sign}${_esc_code(f'{abs(float(pnl)):.3f}')}`  "
-        f"\\({_esc_code(f'{pnl_sign}{abs(float(roi)):.1f}%')} ROI\\)\n\n"
-        f"₿ *BTC:* `{_esc_code(f'${btc_entry:,.2f}')}` → `{_esc_code(f'${btc_exit:,.2f}')}`  "
-        f"\\({btc_sign}`{_esc_code(f'{abs(float(btc_change)):.2f}%')}`\\)\n\n"
-        f"💵 *Balance:* `${_esc_code(f'{balance:.2f}')}`\n"
-        f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L`  "
-        f"\\|  PnL: `{'+' if _s.session_pnl>=0 else chr(92)+'-'}${_esc_code(f'{abs(float(_s.session_pnl)):.2f}')}`\n"
-        f"⏰ Entry: `{_esc_code(entry_ist)}` → Exit: `{_esc_code(_now_ist_str())}`"
-    )
-
-
-def _fmt_skipped(reason: str, momentum_p: Optional[float],
-                 edge: Optional[float], mom1: Optional[float], mom3: Optional[float]) -> str:
-    """Not sent to Telegram — only logged. But returned here for logging."""
-    btc = _btc_now_str()
-    p_str   = f"{momentum_p*100:.1f}%" if momentum_p else "N/A"
-    e_str   = f"{edge*100:.2f}%"       if edge else "N/A"
-    m1_str  = f"{mom1*100:+.2f}%"      if mom1 is not None else "N/A"
-    m3_str  = f"{mom3*100:+.2f}%"      if mom3 is not None else "N/A"
-    return (f"SKIP [{reason}] BTC={btc} p={p_str} edge={e_str} "
-            f"1m={m1_str} 3m={m3_str}")
-
-
-def _fmt_pause_alert(reason: str) -> str:
-    return (
-        f"🛑 *AGENT PAUSED*\n\n"
-        f"_{_esc(reason)}_\n\n"
-        f"💵 Balance: `${_esc_code(f'{db.get_paper_balance(AGENT_USER_ID):.2f}')}`\n"
-        f"🏆 Session: `{_s.session_wins}W` / `{_s.session_losses}L`\n"
+        f"📊 *Market:* BTC {_esc(_et_label(slug))} \\| *Dir:* *{_esc(outcome.upper())}*\n"
+        f"💰 *Price:* `${_esc_code(f'{buy_price:.4f}')}` → `${_esc_code(f'{sell_price:.4f}')}`\n"
+        f"💵 *PnL:* `{pnl_sign}${_esc_code(f'{abs(float(pnl)):.2f}')}` \\({_esc_code(f'{pnl_sign}{abs(float(roi)):.1f}%')} ROI\\)\n"
+        f"₿ *BTC:* `{_esc_code(f'${btc_entry:,.0f}')}` → `{_esc_code(f'${btc_exit:,.0f}')}`\n"
+        f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L` \\| Bal: `${_esc_code(f'{balance:.2f}')}`\n"
         f"⏰ `{_esc_code(_now_ist_str())}`"
     )
 
-
-# ─── Auto-Sell with Retry ──────────────────────────────────────────────────────
-
-async def _attempt_sell(bot, slug: str, outcome: str,
-                        buy_price: float, shares: float,
-                        btc_entry: float, entry_ist: str,
-                        retry: int = 0) -> bool:
-    """
-    Try to sell the position. Returns True if successful, False if should retry later.
-    On permanent failure (market gone, etc.) also returns True to stop retrying.
-    """
-    logger.info("[AGENT] Sell attempt %d/%d: %s in %s", retry + 1, SELL_RETRY_MAX, outcome, slug)
-
-    ok, msg = await _paper_sell_core(AGENT_USER_ID, outcome, None, slug)
-    msg_str = str(msg).replace("\\", "")
-
-    if ok:
-        # Parse sell price from the message
-        sell_price = buy_price  # fallback
-        m = re.search(r"Exit price[^0-9]+([0-9.]+)", msg_str, flags=re.IGNORECASE)
-        if not m:
-            m = re.search(r"@\s*\$([0-9.]+)", msg_str)
-            m2 = re.search(r"Shares.*?@\s*\$([0-9.]+)", msg_str)
-            if m2:
-                try:
-                    sell_price = float(m2.group(1))
-                except ValueError:
-                    pass
-
-        pnl          = (sell_price - buy_price) * shares
-        win          = pnl >= 0
-        btc_at_exit  = _btc_now()
-
-        if win:
-            _s.session_wins      += 1
-            _s.consecutive_losses = 0
-        else:
-            _s.session_losses    += 1
-            _s.consecutive_losses += 1
-            if _s.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                _s.pause_until        = time.time() + PAUSE_DURATION
-                _s.consecutive_losses = 0
-                logger.warning("[AGENT] 4 consecutive losses → %ds pause", PAUSE_DURATION)
-                await _send(bot, _fmt_pause_alert(
-                    f"4 consecutive losses. Trading paused {PAUSE_DURATION // 60} minutes."))
-
-        _s.session_pnl  += pnl
-        _s.last_action   = f"SELL {outcome.upper()} {'WIN' if win else 'LOSS'} pnl={pnl:+.4f}"
-        _s.sell_retry_count = 0
-
-        logger.info("[AGENT] SELL OK: outcome=%s sell=%.4f buy=%.4f pnl=%+.4f",
-                    outcome, sell_price, buy_price, pnl)
-        await _send(bot, _fmt_sell_alert(
-            outcome=outcome,
-            sell_price=sell_price,
-            buy_price=buy_price,
-            shares=shares,
-            pnl=pnl,
-            slug=slug,
-            btc_entry=btc_entry,
-            btc_exit=btc_at_exit,
-            entry_ist=entry_ist,
-        ))
-        return True
-
-    # Sell failed — check if it's a "waiting for resolution" case (retryable)
-    if "awaiting" in msg_str.lower() or "resolut" in msg_str.lower():
-        # Keep retrying indefinitely for actual resolution instead of force-closing
-        logger.info("[AGENT] Market awaiting resolution — will retry in %ds (attempt %d)",
-                    SELL_RETRY_DELAY, retry + 1)
-        return False   # signal: retry later
-
-    # Permanent failure (position not found, etc.)
-    logger.warning("[AGENT] Sell permanent failure: %s", msg_str[:150])
-    _s.last_action = "SELL FAILED (permanent)"
-    return True  # stop retrying
+def _fmt_skipped(reason: str, momentum_p: Optional[float],
+                 edge: Optional[float], mom1: Optional[float], mom3: Optional[float]) -> str:
+    return f"SKIP [{reason}] btc={_btc_now_str()} p={momentum_p or 0:.1%} e={edge or 0:.1%}"
 
 
 # ─── Orphan Recovery ──────────────────────────────────────────────────────────
@@ -454,293 +309,161 @@ def _recover_orphaned_position() -> None:
         logger.error("[AGENT] Orphan recovery error: %s", exc)
 
 
-# ─── Core Trading Cycle ────────────────────────────────────────────────────────
+# ─── Auto-Sell & Exec ──────────────────────────────────────────────────────────
+
+async def _attempt_sell(bot, slug: str, outcome: str,
+                         buy_price: float, shares: float,
+                         btc_entry: float, entry_ist: str,
+                         retry: int = 0) -> bool:
+    logger.info("[AGENT] Sell target: %s in %s (attempt %d)", outcome, slug, retry + 1)
+    ok, msg = await _paper_sell_core(AGENT_USER_ID, outcome, None, slug)
+    msg_str = str(msg).replace("\\", "")
+
+    if ok:
+        sell_price = buy_price
+        m = re.search(r"@\s*\$([0-9.]+)", msg_str)
+        if m: sell_price = float(m.group(1))
+        
+        pnl = (sell_price - buy_price) * shares
+        if pnl >= 0: _s.session_wins += 1; _s.consecutive_losses = 0
+        else: _s.session_losses += 1; _s.consecutive_losses += 1
+        
+        _s.session_pnl += pnl
+        _s.current_slug = None; _s.current_outcome = None
+        await _send(bot, _fmt_sell_alert(outcome, sell_price, buy_price, shares, pnl, slug, btc_entry, _btc_now(), entry_ist))
+        return True
+
+    if "awaiting" in msg_str.lower(): return False
+    return True # stop retrying on hard error
 
 async def _cycle(bot) -> None:
-    """Single decision + execution cycle."""
-    if not _s.enabled:
+    if not _s.enabled: return
+    if time.time() < _s.pause_until: return
+
+    # Daily check
+    today = _now_utc().date()
+    balance = float(db.get_paper_balance(AGENT_USER_ID))
+    if _s.last_day != today:
+        _s.daily_start_balance = balance; _s.last_day = today
+    if _s.daily_start_balance and (balance - _s.daily_start_balance) / _s.daily_start_balance <= -MAX_DAILY_LOSS_PCT:
         return
 
-    # Cool-down
-    if time.time() < _s.pause_until:
-        logger.info("[AGENT] Cool-down — %ds left", int(_s.pause_until - time.time()))
+    # ── Already holding ────────────────────────────────────────────────────────
+    if _s.current_slug and _s.current_outcome:
+        # Check Scap Exits (HFT logic)
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Direct lookup of current price to avoid Gamma API lag
+                from handlers import GAMMA_API_URL as GURL # type: ignore
+                async with session.get(GURL.format(slug=str(_s.current_slug))) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        markets = data[0].get("markets", []) if data else []
+                        if markets:
+                            outs = json.loads(markets[0].get("outcomes", "[]"))
+                            tids = json.loads(markets[0].get("clobTokenIds", "[]"))
+                            idx = -1
+                            for i, o in enumerate(outs):
+                                if o.lower() == str(_s.current_outcome).lower(): idx = i; break
+                            if idx >= 0 and tids:
+                                cp = await _get_clob_price(session, tids[idx], "buy")
+                                if cp:
+                                    roi = (cp - _s.current_buy_price) / _s.current_buy_price
+                                    # Take Profit / Stop Loss
+                                    if roi >= TAKE_PROFIT_PCT or roi <= -STOP_LOSS_PCT:
+                                        logger.info("[AGENT] HFT EXIT: ROI=%.1f%% in %s", roi*100, _s.current_slug)
+                                        await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
+                                        return
+                                    # Signal Reversal
+                                    if REVERSAL_EXIT:
+                                        mp, _, _ = _compute_signal()
+                                        if mp:
+                                            is_up = str(_s.current_outcome).lower() == "up"
+                                            if (is_up and mp < 0.45) or (not is_up and mp > 0.55):
+                                                logger.info("[AGENT] REVERSAL EXIT: mp=%.3f", mp)
+                                                await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
+                                                return
+            except Exception: pass
+
+        # Resolution check
+        m, _ = await _get_target_market()
+        if m and m.get("slug") != _s.current_slug:
+            await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
         return
 
-    # Daily loss limit
-    today   = _now_utc().date()
-    balance = db.get_paper_balance(AGENT_USER_ID)
+    # ── Signal Eval ────────────────────────────────────────────────────────────
+    market, _ = await _get_target_market()
+    if not market: return
+    slug = str(market.get("slug", ""))
+    age  = _window_age_secs(slug)
+    if age is None or age < 30 or age > 250: return
 
-    if _s.last_day is None or today != _s.last_day:
-        _s.daily_start_balance = balance
-        _s.last_day = today
+    m_p, edge, _ = _compute_signal()
+    if m_p is None or edge < AGENT_MIN_EDGE: return
 
-    if _s.daily_start_balance and _s.daily_start_balance > 0:
-        daily_pct = (balance - _s.daily_start_balance) / _s.daily_start_balance
-        if daily_pct <= -MAX_DAILY_LOSS_PCT:
-            logger.warning("[AGENT] Daily loss %.1f%% — no more trades today", daily_pct * 100)
-            _s.last_action = f"Daily loss limit {daily_pct*100:.1f}%"
-            return
-
-    # ── Fetch current market ───────────────────────────────────────────────
-    market, mode = await _get_target_market()
-    if not market:
-        logger.info("[AGENT] No tradeable BTC 5m market found")
-        return
-
-    current_slug = market.get("slug", "")
-    logger.info("[AGENT] Cycle: slug=%s mode=%s holding=%s balance=$%.2f BTC=%s",
-                current_slug, mode, _s.current_slug or "None",
-                balance, _btc_now_str())
-
-    # ── Auto-sell if market rolled over ────────────────────────────────────
-    if _s.current_slug and current_slug and current_slug != _s.current_slug:
-        logger.info("[AGENT] Market changed → %s → sell old: %s", current_slug, _s.current_slug)
-        # Preserve state until sell succeeds
-        old_slug     = _s.current_slug
-        old_outcome  = _s.current_outcome
-        old_buy      = _s.current_buy_price
-        old_shares   = _s.current_shares
-        old_btc      = _s.current_btc_at_entry
-        old_ist      = _s.current_entry_ist
-
-        sold = await _attempt_sell(bot, str(old_slug), old_outcome or "Up",
-                                    old_buy, old_shares, old_btc, old_ist,
-                                    retry=_s.sell_retry_count)
-        if sold:
-            _s.current_slug    = None
-            _s.current_outcome = None
-            _s.sell_retry_count = 0
-        else:
-            # Keep state and schedule retry (slug may or may not have changed)
-            _s.sell_retry_count += 1
-            _s.last_action = f"Awaiting sell retry {_s.sell_retry_count}/{SELL_RETRY_MAX}"
-            return   # come back next cycle
-
-    # ── Handle pending sell retries (slug might not have changed yet) ─────
-    if _s.current_slug and _s.sell_retry_count > 0:
-        logger.info("[AGENT] Retrying sell for %s (attempt %d/%d)",
-                    _s.current_slug, _s.sell_retry_count, SELL_RETRY_MAX)
-        old_slug    = _s.current_slug
-        old_outcome = _s.current_outcome
-        old_buy     = _s.current_buy_price
-        old_shares  = _s.current_shares
-        old_btc     = _s.current_btc_at_entry
-        old_ist     = _s.current_entry_ist
-
-        sold = await _attempt_sell(bot, str(old_slug), old_outcome or "Up",
-                                    old_buy, old_shares, old_btc, old_ist,
-                                    retry=_s.sell_retry_count)
-        if sold:
-            _s.current_slug     = None
-            _s.current_outcome  = None
-            _s.sell_retry_count = 0
-        else:
-            _s.sell_retry_count += 1
-            _s.last_action = f"Sell retry {_s.sell_retry_count}/{SELL_RETRY_MAX}"
-            return
-
-    # ── Already holding a position — wait ─────────────────────────────────
-    if _s.current_slug:
-        logger.info("[AGENT] Holding %s in %s — waiting for resolution",
-                    _s.current_outcome, _s.current_slug)
-        curr_slug = str(_s.current_slug) # type: ignore
-        _s.last_action = f"Holding {(_s.current_outcome or '?').upper()} in {_et_label(curr_slug)}"
-        return
-
-    # ── PROFESSIONAL RULE: Window timing ──────────────────────────────────
-    window_age = _window_age_secs(current_slug)
-    if window_age is not None:
-        if window_age < EARLY_ENTRY_SECS:
-            logger.info("[AGENT] Too early in window (%.0fs < %ds) — waiting", window_age, EARLY_ENTRY_SECS)
-            _s.last_action = f"Too early ({window_age:.0f}s < {EARLY_ENTRY_SECS}s)"
-            return
-        if window_age > LATE_ENTRY_SECS:
-            logger.info("[AGENT] Too late in window (%.0fs > %ds) — skip", window_age, LATE_ENTRY_SECS)
-            _s.last_action = f"Too late ({window_age:.0f}s > {LATE_ENTRY_SECS}s)"
-            return
-
-    # ── Momentum signal ────────────────────────────────────────────────────
-    n_ticks = len(_s.prices)
-    if n_ticks < MIN_PRICE_SAMPLES:
-        logger.info("[AGENT] Warming up (%d/%d ticks)", n_ticks, MIN_PRICE_SAMPLES)
-        _s.last_action = f"Warming up ({n_ticks}/{MIN_PRICE_SAMPLES} ticks)"
-        return
-
-    momentum_p, edge, raw_factor = _compute_signal()
-    p1_val  = _price_n_secs_ago(60)
-    p3_val  = _price_n_secs_ago(180)
-    now_p   = _s.prices[-1][1] if _s.prices else 0
-    mom1    = (now_p - p1_val)  / p1_val  if p1_val  else 0
-    mom3    = (now_p - p3_val)  / p3_val  if p3_val  else 0
-
-    if momentum_p is None or edge is None:
-        reason = "signal conflict (1m/3m disagree)" if raw_factor is not None else "insufficient data"
-        _s.last_action = _fmt_skipped(reason, None, None,
-                                      mom1 if p1_val else None, mom3 if p3_val else None)
-        logger.info("[AGENT] %s", _s.last_action)
-        return
-
-    # Safely cast for Pyre
-    m_p = float(momentum_p or 0.0)
-    e_p = float(edge or 0.0)
+    # Kelly Sizing
+    t_amt = AGENT_TRADE_USD
+    if balance > STARTING_BALANCE:
+        t_amt = min(AGENT_TRADE_USD * 3, balance * KELLY_FRACTION)
 
     outcome = "Up" if m_p > 0.5 else "Down"
-
-    logger.info(
-        "[AGENT] Signal OK: BTC=%s ticks=%d mom1=%+.3f%% mom3=%+.3f%% "
-        "p=%.3f edge=%.3f%% direction=%s min_edge=%.3f%% window=%.0fs",
-        _btc_now_str(), n_ticks, mom1 * 100, mom3 * 100,
-        m_p, e_p * 100, outcome, AGENT_MIN_EDGE * 100,
-        window_age or 0,
-    )
-
-    if e_p < AGENT_MIN_EDGE:
-        _s.last_action = _fmt_skipped(f"edge {e_p*100:.3f}% < {AGENT_MIN_EDGE*100:.1f}%",
-                                       momentum_p, edge, mom1, mom3)
-        logger.info("[AGENT] %s", _s.last_action)
-        return
-
-    # ── Balance check ──────────────────────────────────────────────────────
-    if balance < AGENT_TRADE_USD:
-        logger.warning("[AGENT] Low balance $%.2f < $%.2f", balance, AGENT_TRADE_USD)
-        _s.last_action = f"Low balance ${balance:.2f}"
-        return
-
-    # ── Execute BUY ────────────────────────────────────────────────────────
-    logger.info("[AGENT] → Placing BUY: %s $%.2f on %s", outcome, AGENT_TRADE_USD, current_slug)
-    ok, msg, slug = await _paper_buy_core(AGENT_USER_ID, outcome, AGENT_TRADE_USD)
-
-    if ok and slug:
-        fill_price = 0.5
-        m = re.search(r"Buy price[^0-9]+([0-9.]+)", str(msg).replace("\\", ""), flags=re.IGNORECASE)
-        if m:
-            try:
-                fill_price = float(m.group(1))
-            except ValueError:
-                pass
-
-        shares = AGENT_TRADE_USD / fill_price if fill_price > 0 else AGENT_TRADE_USD
-
-        _s.current_slug         = slug
-        _s.current_outcome      = outcome
-        _s.current_buy_price    = fill_price
-        _s.current_shares       = shares
+    ok, msg, _ = await _paper_buy_core(AGENT_USER_ID, outcome, t_amt, slug)
+    if ok:
+        _s.current_slug       = slug
+        _s.current_outcome    = outcome
+        _s.current_buy_price  = t_amt / (t_amt / 0.5) # estimate, will be updated by alert parse if needed
+        # We need the actual fill price. Re-parse from msg.
+        fill = 0.5
+        mf = re.search(r"price.*?\$([0-9.]+)", str(msg).lower())
+        if mf: fill = float(mf.group(1))
+        _s.current_buy_price  = fill
+        _s.current_shares     = t_amt / fill
         _s.current_btc_at_entry = _btc_now()
-        _s.current_entry_time   = time.time()
         _s.current_entry_ist    = _now_ist_str()
-        _s.last_action          = f"BUY {outcome.upper()} @ ${fill_price:.4f}"
-        _s.sell_retry_count     = 0
-
-        logger.info("[AGENT] ✅ BUY: %s @ %.4f  shares=%.4f  BTC=%s  in %s",
-                    outcome, fill_price, shares, _btc_now_str(), slug)
-        await _send(bot, _fmt_buy_alert(
-            outcome=outcome,
-            fill_price=fill_price,
-            edge=e_p,
-            momentum_p=m_p,
-            slug=slug,
-            mom1=mom1,
-            mom3=mom3,
-        ))
-    else:
-        clean = str(msg).replace("\\", "")[:120]
-        logger.warning("[AGENT] BUY FAILED: %s", clean)
-        _s.last_action = f"BUY FAILED: {clean[:60]}"
-
-
-# ─── Outer Loop ────────────────────────────────────────────────────────────────
-
-async def _agent_loop(bot) -> None:
-    _s.running = True
-    db.init_paper_user(AGENT_USER_ID, starting_balance=STARTING_BALANCE)
-    balance = db.get_paper_balance(AGENT_USER_ID)
-
-    # Recover any position left from a previous session
-    _recover_orphaned_position()
-
-    logger.info("[AGENT] 🚀 v3 started | poll=%ds | trade=$%.2f | min_edge=%.1f%% | balance=$%.2f",
-                AGENT_POLL_SECONDS, AGENT_TRADE_USD, AGENT_MIN_EDGE * 100, balance)
-
-    # Small delay so bot is fully initialised before we send messages
-    await asyncio.sleep(4)
-    await _send(bot, _fmt_startup(balance))
-
-    while True:
-        try:
-            await _cycle(bot)
-        except Exception as exc:
-            logger.error("[AGENT] Cycle error: %s", exc, exc_info=True)
-        await asyncio.sleep(AGENT_POLL_SECONDS)
-
+        await _send(bot, _fmt_buy_alert(outcome, fill, edge, m_p, slug, 0, 0, t_amt))
 
 # ─── Public API ────────────────────────────────────────────────────────────────
 
-def start(app) -> None:
-    """Called from bot.py _post_init via `await agent.start(app)`."""
-    if _AGENT_CHAT_ID_ENV == 0:
-        logger.info("[AGENT] AGENT_CHAT_ID=0 — will auto-detect from DB.")
-    _s.tasks = [
-        asyncio.create_task(_binance_ws_loop(), name="agent_binance_ws"),
-        asyncio.create_task(_agent_loop(app.bot),  name="agent_trading_loop")
-    ]
-    logger.info("[AGENT] Background tasks created ✅")
-
-def stop() -> None:
-    """Cancels background tasks gracefully."""
-    for task in getattr(_s, "tasks", []):
-        if not task.done():
-            task.cancel()
-    logger.info("[AGENT] Background tasks cancelled ✅")
-
-
 def toggle() -> bool:
     _s.enabled = not _s.enabled
-    logger.info("[AGENT] Toggled → %s", "ENABLED" if _s.enabled else "DISABLED")
+    logger.info("[AGENT] Bot %s", "ENABLED" if _s.enabled else "PAUSED")
     return _s.enabled
 
+def is_running() -> bool: return _s.running
 
-def is_enabled() -> bool:
-    return _s.enabled
+def start(bot):
+    if _s.running: return
+    _s.running = True
+    _recover_orphaned_position()
+    loop = asyncio.get_event_loop()
+    _s.tasks.append(loop.create_task(_binance_ws_loop()))
+    
+    async def _main_loop():
+        await _send(bot, _fmt_startup(db.get_paper_balance(AGENT_USER_ID)))
+        while _s.running:
+            await _cycle(bot)
+            await asyncio.sleep(AGENT_POLL_SECONDS)
+    
+    _s.tasks.append(loop.create_task(_main_loop()))
+    logger.info("[AGENT] Started v4 (HFT Mode)")
 
+def stop():
+    _s.running = False
+    for t in _s.tasks: t.cancel()
+    _s.tasks = []
+    logger.info("[AGENT] Stopped")
 
 def get_status_message() -> str:
-    paused_txt = ""
-    if time.time() < _s.pause_until:
-        left = int(_s.pause_until - time.time())
-        paused_txt = f"\n⏸ *Cool\\-down:* `{left}s` left"
-
-    balance  = db.get_paper_balance(AGENT_USER_ID)
-    pnl      = balance - STARTING_BALANCE
-    pnl_sign = "+" if pnl >= 0 else "\\-"
-    session_sign = "+" if _s.session_pnl >= 0 else "\\-"
-
-    pos_text = "None"
-    if _s.current_slug and _s.current_outcome:
-        try:
-            age = _window_age_secs(str(_s.current_slug)) or 0
-            pos_text = (
-                f"{_s.current_outcome.upper()} @ ${_s.current_buy_price:.4f} "
-                f"\\({_et_label(_s.current_slug)} / {age:.0f}s in\\)"
-            )
-        except Exception:
-            pos_text = f"{_s.current_outcome} {_s.current_slug}"
-
-    feed_ok  = ("✅ " + _btc_now_str()) if len(_s.prices) >= MIN_PRICE_SAMPLES else f"⏳ ({len(_s.prices)} ticks)"
-    btn_text = "🟢 ACTIVE" if _s.enabled else "🔴 PAUSED"
-
+    balance = db.get_paper_balance(AGENT_USER_ID)
+    pnl = balance - STARTING_BALANCE
+    psign = "+" if pnl >= 0 else ""
     return (
-        f"🤖 *PolyAgent v3 — Status*\n\n"
-        f"{btn_text}{paused_txt}\n"
-        f"📡 *BTC feed:* {_esc(feed_ok)}\n"
-        f"📍 *Position:* `{_esc_code(pos_text)}`\n"
-        f"💵 *Balance:* `${_esc_code(f'{balance:.2f}')}`\n"
-        f"📊 *All\\-time PnL:* `{pnl_sign}${_esc_code(f'{abs(float(pnl)):.2f}')}`\n"
-        f"💰 *Session PnL:* `{session_sign}${_esc_code(f'{abs(float(_s.session_pnl)):.3f}')}`\n"
+        f"🤖 *PolyAgent v4 — Status*\n\n"
+        f"{'🟢 ACTIVE' if _s.enabled else '🔴 PAUSED'}\n"
+        f"📡 *BTC:* `{_esc_code(_btc_now_str())}`\n"
+        f"💵 *Balance:* `${_esc_code(f'{balance:.2f}')}` \\({psign}${_esc_code(f'{pnl:.2f}')}\\)\n"
         f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L`\n"
-        f"🔁 *Streak:* `{_s.consecutive_losses}` losses in a row\n"
-        f"📝 *Last:* {_esc(str(_s.last_action)[:80])}\n" # type: ignore
-        f"⚙️ *Config:* `${_esc_code(f'{AGENT_TRADE_USD:.0f}')}`/trade  "
-        f"min `{_esc_code(f'{AGENT_MIN_EDGE*100:.0f}%')}` edge  "
-        f"`{AGENT_POLL_SECONDS}s` poll\n"
+        f"📝 *Last:* {_esc(str(_s.last_action)[:50])}\n"
+        f"⚙️ *HFT:* Polling 1s \\| TP 8% \\| SL 5%\n"
         f"⏰ `{_esc_code(_now_ist_str())}`"
     )
