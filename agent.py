@@ -100,6 +100,7 @@ class _State:
     last_day: Optional[object]           = None
     resolved_chat_id: int      = 0          # auto-detected chat_id
     sell_retry_count: int      = 0          # retry count for the current sell attempt
+    tasks: list                = []
 
 
 _s = _State()
@@ -232,10 +233,11 @@ async def _send(bot, text: str) -> None:
             parse_mode="MarkdownV2",
             disable_web_page_preview=True,
         )
-    except Exception:
-        # Strip MD and try plain
+    except Exception as primary_e:
+        # MarkdownV2 failed, strip only formatting characters, NOT punctuation like . ! -
         try:
-            plain = re.sub(r"[*_`\[\]()~>#+\-=|{}.!\\]", "", text)
+            logger.debug(f"[AGENT] MarkdownV2 failed: {primary_e}. Sending plain text.")
+            plain = re.sub(r"[*_`\[\]()~>#+=|\\]", "", text)
             await bot.send_message(chat_id=chat_id, text=plain)
         except Exception as e2:
             logger.warning("[AGENT] TG send failed: %s", e2)
@@ -415,33 +417,10 @@ async def _attempt_sell(bot, slug: str, outcome: str,
 
     # Sell failed — check if it's a "waiting for resolution" case (retryable)
     if "awaiting" in msg_str.lower() or "resolut" in msg_str.lower():
-        if retry < SELL_RETRY_MAX:
-            logger.info("[AGENT] Market awaiting resolution — will retry in %ds (attempt %d/%d)",
-                        SELL_RETRY_DELAY, retry + 1, SELL_RETRY_MAX)
-            return False   # signal: retry later
-        else:
-            # Exhausted retries — force-close at current mid-price (0.5 as neutral)
-            logger.warning("[AGENT] Sell retries exhausted — force-closing at $0.50")
-            pnl = (0.5 - buy_price) * shares
-            _s.session_pnl += pnl
-            _s.last_action = "SELL FORCE-CLOSED (resolution timeout)"
-            # Remove position from DB manually
-            try:
-                pos = db.get_paper_position(AGENT_USER_ID, slug, outcome)
-                if pos:
-                    db.remove_paper_position(pos["id"])
-                    bal = db.get_paper_balance(AGENT_USER_ID)
-                    db.update_paper_balance(AGENT_USER_ID, bal + 0.5 * shares)
-            except Exception as e:
-                logger.error("[AGENT] Force-close DB error: %s", e)
-            await _send(bot,
-                f"⚠️ *Agent: force\\-closed position*\n"
-                f"_{_esc(outcome.upper())} in {_esc(_et_label(slug))} — "
-                f"market awaiting resolution after {SELL_RETRY_MAX} retries\\._\n"
-                f"Closed at neutral `$0\\.50` \\| pnl `{'+' if pnl>=0 else chr(92)+'-'}"
-                f"${_esc_code(f'{abs(float(pnl)):.3f}')}`"
-            )
-            return True  # done, don't retry anymore
+        # Keep retrying indefinitely for actual resolution instead of force-closing
+        logger.info("[AGENT] Market awaiting resolution — will retry in %ds (attempt %d)",
+                    SELL_RETRY_DELAY, retry + 1)
+        return False   # signal: retry later
 
     # Permanent failure (position not found, etc.)
     logger.warning("[AGENT] Sell permanent failure: %s", msg_str[:150])
@@ -564,7 +543,8 @@ async def _cycle(bot) -> None:
     if _s.current_slug:
         logger.info("[AGENT] Holding %s in %s — waiting for resolution",
                     _s.current_outcome, _s.current_slug)
-        _s.last_action = f"Holding {(_s.current_outcome or '?').upper()} in {_et_label(str(_s.current_slug))}"
+        curr_slug = str(_s.current_slug) # type: ignore
+        _s.last_action = f"Holding {(_s.current_outcome or '?').upper()} in {_et_label(curr_slug)}"
         return
 
     # ── PROFESSIONAL RULE: Window timing ──────────────────────────────────
@@ -695,13 +675,22 @@ async def _agent_loop(bot) -> None:
 
 # ─── Public API ────────────────────────────────────────────────────────────────
 
-async def start(app) -> None:
+def start(app) -> None:
     """Called from bot.py _post_init via `await agent.start(app)`."""
     if _AGENT_CHAT_ID_ENV == 0:
         logger.info("[AGENT] AGENT_CHAT_ID=0 — will auto-detect from DB.")
-    asyncio.create_task(_binance_ws_loop(), name="agent_binance_ws")
-    asyncio.create_task(_agent_loop(app.bot),  name="agent_trading_loop")
+    _s.tasks = [
+        asyncio.create_task(_binance_ws_loop(), name="agent_binance_ws"),
+        asyncio.create_task(_agent_loop(app.bot),  name="agent_trading_loop")
+    ]
     logger.info("[AGENT] Background tasks created ✅")
+
+def stop() -> None:
+    """Cancels background tasks gracefully."""
+    for task in getattr(_s, "tasks", []):
+        if not task.done():
+            task.cancel()
+    logger.info("[AGENT] Background tasks cancelled ✅")
 
 
 def toggle() -> bool:
@@ -749,7 +738,7 @@ def get_status_message() -> str:
         f"💰 *Session PnL:* `{session_sign}${_esc_code(f'{abs(float(_s.session_pnl)):.3f}')}`\n"
         f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L`\n"
         f"🔁 *Streak:* `{_s.consecutive_losses}` losses in a row\n"
-        f"📝 *Last:* {_esc(str(_s.last_action)[0:80])}\n"
+        f"📝 *Last:* {_esc(str(_s.last_action)[:80])}\n" # type: ignore
         f"⚙️ *Config:* `${_esc_code(f'{AGENT_TRADE_USD:.0f}')}`/trade  "
         f"min `{_esc_code(f'{AGENT_MIN_EDGE*100:.0f}%')}` edge  "
         f"`{AGENT_POLL_SECONDS}s` poll\n"
