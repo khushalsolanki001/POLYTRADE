@@ -1871,3 +1871,26 @@ async def cmd_agent_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.warning("MarkdownV2 failed in agent_toggle: %s", exc)
         plain = "Agent RESUMED." if new_state else "Agent PAUSED."
         await update.message.reply_text(plain)
+
+import chart
+import os
+
+async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate and send a visual PnL chart using the history DB."""
+    user_id = update.effective_user.id
+    chart_path = f"pnl_{user_id}.png"
+    
+    sent = await update.message.reply_text("📊 Generating performance chart...", parse_mode="MarkdownV2")
+    
+    try:
+        success = chart.generate_pnl_chart(user_id, chart_path)
+        if success and os.path.exists(chart_path):
+            with open(chart_path, 'rb') as f:
+                await update.message.reply_photo(photo=f, caption="📈 *Here is your cumulative trading performance history\\.*", parse_mode="MarkdownV2", reply_markup=_main_menu_keyboard())
+            os.remove(chart_path)
+            await sent.delete()
+        else:
+            await sent.edit_text("ℹ️ *You don't have enough completed trades to generate a chart yet\\.*", parse_mode="MarkdownV2")
+    except Exception as e:
+        logger.error(f"Error generating chart: {e}", exc_info=True)
+        await sent.edit_text("❌ Failed to generate chart\\. Try again later\\.")
