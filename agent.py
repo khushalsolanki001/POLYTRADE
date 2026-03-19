@@ -337,10 +337,15 @@ async def _attempt_sell(bot, slug: str, outcome: str,
     return True # stop retrying on hard error
 
 async def _cycle(bot) -> None:
-    if not _s.enabled: return
-    if time.time() < _s.pause_until: return
+    if not _s.enabled or time.time() < _s.pause_until: return
 
-    # Daily check
+    # Heartbeat (once per minute)
+    now_ts = time.time()
+    if int(now_ts) % 60 == 0:
+        bal = db.get_paper_balance(AGENT_USER_ID)
+        logger.info("[AGENT] Evaluation loop: holding=%s portfolio=$%.2f", _s.current_slug or "None", bal)
+
+    # Daily risk check
     today = _now_utc().date()
     balance = float(db.get_paper_balance(AGENT_USER_ID))
     if _s.last_day != today:
@@ -350,48 +355,44 @@ async def _cycle(bot) -> None:
 
     # ── Already holding ────────────────────────────────────────────────────────
     if _s.current_slug and _s.current_outcome:
-        # Check Scap Exits (HFT logic)
         async with aiohttp.ClientSession() as session:
             try:
-                # Direct lookup of current price to avoid Gamma API lag
-                from handlers import GAMMA_API_URL as GURL # type: ignore
-                async with session.get(GURL.format(slug=str(_s.current_slug))) as r:
+                # Direct price lookup
+                async with session.get(GAMMA_API_URL.format(slug=str(_s.current_slug))) as r:
                     if r.status == 200:
                         data = await r.json()
                         markets = data[0].get("markets", []) if data else []
                         if markets:
-                            outs = json.loads(markets[0].get("outcomes", "[]"))
-                            tids = json.loads(markets[0].get("clobTokenIds", "[]"))
-                            idx = -1
-                            for i, o in enumerate(outs):
-                                if o.lower() == str(_s.current_outcome).lower(): idx = i; break
-                            if idx >= 0 and tids:
-                                cp = await _get_clob_price(session, tids[idx], "buy")
-                                if cp:
-                                    roi = (cp - _s.current_buy_price) / _s.current_buy_price
-                                    # Take Profit / Stop Loss
-                                    if roi >= TAKE_PROFIT_PCT or roi <= -STOP_LOSS_PCT:
-                                        logger.info("[AGENT] HFT EXIT: ROI=%.1f%% in %s", roi*100, _s.current_slug)
-                                        await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
-                                        return
-                                    # Signal Reversal
-                                    if REVERSAL_EXIT:
-                                        mp, _, _ = _compute_signal()
-                                        if mp:
-                                            is_up = str(_s.current_outcome).lower() == "up"
-                                            if (is_up and mp < 0.45) or (not is_up and mp > 0.55):
-                                                logger.info("[AGENT] REVERSAL EXIT: mp=%.3f", mp)
+                            m = markets[0]
+                            # Auto-sell if resolved
+                            if m.get("closed") or m.get("active") is False:
+                                p_out = 1.0 if m.get("unsettled_outcome") == _s.current_outcome else 0.0
+                                await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
+                                return
+                            
+                            # HFT Scalp Exit (CLOB)
+                            if m.get("clobTokenIds"):
+                                tids = json.loads(m["clobTokenIds"])
+                                idx = 0 if str(_s.current_outcome).lower() in ("up", "yes") else 1
+                                if idx >= 0 and tids:
+                                    cp = await _get_clob_price(session, tids[idx], "buy")
+                                    if cp > 0:
+                                        roi = (cp - _s.current_buy_price) / _s.current_buy_price
+                                        if roi >= TAKE_PROFIT_PCT or roi <= -STOP_LOSS_PCT:
+                                            logger.info("[AGENT] HFT EXIT Triggered: ROI=%.1f%%", roi*100)
+                                            await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
+                                            return
+                                        if REVERSAL_EXIT:
+                                            mp, _, _ = _compute_signal()
+                                            if mp and ((str(_s.current_outcome).lower() == "up" and mp < 0.45) or (str(_s.current_outcome).lower() == "down" and mp > 0.55)):
+                                                logger.info("[AGENT] HFT REVERSAL Triggered: mp=%.3f", mp)
                                                 await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
                                                 return
-            except Exception: pass
+            except Exception as exc:
+                logger.error("[AGENT] Scalp cycle error: %s", exc)
+        return # Skip market detection if holding
 
-        # Resolution check
-        m, _ = await _get_target_market()
-        if m and m.get("slug") != _s.current_slug:
-            await _attempt_sell(bot, str(_s.current_slug), str(_s.current_outcome), _s.current_buy_price, _s.current_shares, _s.current_btc_at_entry, _s.current_entry_ist)
-        return
-
-    # ── Signal Eval ────────────────────────────────────────────────────────────
+    # ── Signal Eval (Not holding) ──────────────────────────────────────────────
     market, _ = await _get_target_market()
     if not market: return
     slug = str(market.get("slug", ""))
