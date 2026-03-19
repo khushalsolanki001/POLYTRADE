@@ -56,3 +56,4 @@ desktop.ini
 .pytest_cache/
 .coverage
 htmlcov/
+temp_repos/4coinsbot/
