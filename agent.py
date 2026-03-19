@@ -398,8 +398,17 @@ async def _cycle(bot) -> None:
     age  = _window_age_secs(slug)
     if age is None or age < 30 or age > 250: return
 
-    m_p, edge, _ = _compute_signal()
-    if m_p is None or edge < AGENT_MIN_EDGE: return
+    m_prob, e_val, _ = _compute_signal()
+    if m_prob is None or e_val is None: return
+    m_p, edge = float(m_prob), float(e_val)
+    if edge < AGENT_MIN_EDGE: return
+
+    # Momentum metrics for the alert
+    p1v = _price_n_secs_ago(60)
+    p3v = _price_n_secs_ago(180)
+    now_p = _btc_now()
+    m1 = (now_p - p1v) / p1v if p1v else 0
+    m3 = (now_p - p3v) / p3v if p3v else 0
 
     # Kelly Sizing
     t_amt = AGENT_TRADE_USD
@@ -411,16 +420,17 @@ async def _cycle(bot) -> None:
     if ok:
         _s.current_slug       = slug
         _s.current_outcome    = outcome
-        _s.current_buy_price  = t_amt / (t_amt / 0.5) # estimate, will be updated by alert parse if needed
-        # We need the actual fill price. Re-parse from msg.
+        # Parse fill price
         fill = 0.5
         mf = re.search(r"price.*?\$([0-9.]+)", str(msg).lower())
-        if mf: fill = float(mf.group(1))
+        if mf: 
+            try: fill = float(mf.group(1))
+            except Exception: pass
         _s.current_buy_price  = fill
         _s.current_shares     = t_amt / fill
-        _s.current_btc_at_entry = _btc_now()
+        _s.current_btc_at_entry = now_p
         _s.current_entry_ist    = _now_ist_str()
-        await _send(bot, _fmt_buy_alert(outcome, fill, edge, m_p, slug, 0, 0, t_amt))
+        await _send(bot, _fmt_buy_alert(outcome, fill, edge, m_p, slug, m1, m3, t_amt))
 
 # ─── Public API ────────────────────────────────────────────────────────────────
 
