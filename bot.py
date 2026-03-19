@@ -91,28 +91,28 @@ import sys
 from datetime import datetime, timezone
 
 # Force UTF-8 output on Windows (avoids cp1252 UnicodeEncodeError for emoji in logs)
-if sys.stdout.encoding.lower() != "utf-8":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if sys.stderr.encoding.lower() != "utf-8":
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+if sys.stdout.encoding.lower() != "utf-8" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace") # type: ignore
+if sys.stderr.encoding.lower() != "utf-8" and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace") # type: ignore
 
 
-from dotenv import load_dotenv
-from telegram import Bot
-from telegram.ext import (
+from dotenv import load_dotenv # type: ignore
+from telegram import Bot # type: ignore
+from telegram.ext import ( # type: ignore
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     filters,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode # type: ignore
 
-import db
-import api
-import scanner
-import agent
-from handlers import (
+import db # type: ignore
+import api # type: ignore
+import scanner # type: ignore
+import agent # type: ignore
+from handlers import ( # type: ignore
     cmd_start,
     cmd_help,
     cmd_my_wallets,
@@ -220,8 +220,9 @@ async def _poll_trades_inner(context) -> None:
         # polled. We set the cursor to the newest trade so we only alert on
         # truly NEW trades going forward, not dump all history.
         if last_ts == 0:
+            trades_list = list(trades) # type: ignore
             newest_ts = max(
-                (api.parse_trade_timestamp(t) for t in trades), default=0
+                (api.parse_trade_timestamp(t) for t in trades_list), default=0 # type: ignore
             )
             init_ts = newest_ts if newest_ts > 0 else int(_time.time())
             db.update_last_timestamp(wallet_id, init_ts)
@@ -235,7 +236,7 @@ async def _poll_trades_inner(context) -> None:
         new_max_ts  = last_ts
         alerts_sent = 0
 
-        for trade in reversed(trades):
+        for trade in reversed(list(trades)): # type: ignore
             ts         = api.parse_trade_timestamp(trade)
             trade_type = api.parse_trade_type(trade)
             size       = api.parse_trade_size(trade)
@@ -294,7 +295,7 @@ async def _poll_trades_inner(context) -> None:
                     parse_mode               = ParseMode.MARKDOWN_V2,
                     disable_web_page_preview = True,
                 )
-                alerts_sent += 1
+                alerts_sent = int(alerts_sent) + 1 # type: ignore
                 logger.info(
                     "  🔔 Alert sent → chat=%s wallet=%s %s $%.2f",
                     chat_id, label, trade_type, usd_value,
@@ -358,7 +359,7 @@ def main() -> None:
     db.init_db()
 
     async def _post_init(app):
-        from telegram import BotCommand
+        from telegram import BotCommand # type: ignore
         commands = [
             BotCommand("start", "Show main menu"),
             BotCommand("help", "Show help message"),
