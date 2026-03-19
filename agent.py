@@ -605,18 +605,22 @@ async def _cycle(bot) -> None:
         logger.info("[AGENT] %s", _s.last_action)
         return
 
-    outcome = "Up" if float(momentum_p) > 0.5 else "Down"
+    # Safely cast for Pyre
+    m_p = float(momentum_p or 0.0)
+    e_p = float(edge or 0.0)
+
+    outcome = "Up" if m_p > 0.5 else "Down"
 
     logger.info(
         "[AGENT] Signal OK: BTC=%s ticks=%d mom1=%+.3f%% mom3=%+.3f%% "
         "p=%.3f edge=%.3f%% direction=%s min_edge=%.3f%% window=%.0fs",
         _btc_now_str(), n_ticks, mom1 * 100, mom3 * 100,
-        float(momentum_p), float(edge) * 100, outcome, AGENT_MIN_EDGE * 100,
+        m_p, e_p * 100, outcome, AGENT_MIN_EDGE * 100,
         window_age or 0,
     )
 
-    if float(edge) < AGENT_MIN_EDGE:
-        _s.last_action = _fmt_skipped(f"edge {float(edge)*100:.3f}% < {AGENT_MIN_EDGE*100:.1f}%",
+    if e_p < AGENT_MIN_EDGE:
+        _s.last_action = _fmt_skipped(f"edge {e_p*100:.3f}% < {AGENT_MIN_EDGE*100:.1f}%",
                                        momentum_p, edge, mom1, mom3)
         logger.info("[AGENT] %s", _s.last_action)
         return
@@ -657,8 +661,8 @@ async def _cycle(bot) -> None:
         await _send(bot, _fmt_buy_alert(
             outcome=outcome,
             fill_price=fill_price,
-            edge=edge,
-            momentum_p=momentum_p,
+            edge=e_p,
+            momentum_p=m_p,
             slug=slug,
             mom1=mom1,
             mom3=mom3,
@@ -729,7 +733,7 @@ def get_status_message() -> str:
     pos_text = "None"
     if _s.current_slug and _s.current_outcome:
         try:
-            age = _window_age_secs(_s.current_slug) or 0
+            age = _window_age_secs(str(_s.current_slug)) or 0
             pos_text = (
                 f"{_s.current_outcome.upper()} @ ${_s.current_buy_price:.4f} "
                 f"\\({_et_label(_s.current_slug)} / {age:.0f}s in\\)"
@@ -750,7 +754,7 @@ def get_status_message() -> str:
         f"💰 *Session PnL:* `{session_sign}${_esc_code(f'{abs(float(_s.session_pnl)):.3f}')}`\n"
         f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L`\n"
         f"🔁 *Streak:* `{_s.consecutive_losses}` losses in a row\n"
-        f"📝 *Last:* {_esc(str(_s.last_action)[:80])}\n"
+        f"📝 *Last:* {_esc(str(_s.last_action)[0:80])}\n"
         f"⚙️ *Config:* `${_esc_code(f'{AGENT_TRADE_USD:.0f}')}`/trade  "
         f"min `{_esc_code(f'{AGENT_MIN_EDGE*100:.0f}%')}` edge  "
         f"`{AGENT_POLL_SECONDS}s` poll\n"
