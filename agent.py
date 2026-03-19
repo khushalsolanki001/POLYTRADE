@@ -431,11 +431,11 @@ def toggle() -> bool:
 
 def is_running() -> bool: return _s.running
 
-def start(bot):
+async def start(bot):
     if _s.running: return
     _s.running = True
     _recover_orphaned_position()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     _s.tasks.append(loop.create_task(_binance_ws_loop()))
     
     async def _main_loop():
