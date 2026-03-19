@@ -220,11 +220,14 @@ async def _send(bot, text: str) -> None:
     chat_id = _resolve_chat_id()
     if not chat_id: return
     try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+        # bot might be Application (has .bot attribute) or Bot directly
+        target = getattr(bot, "bot", bot)
+        await target.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception:
         try:
+            target = getattr(bot, "bot", bot)
             plain = re.sub(r"[*_`\[\]()~>#+=|\\]", "", text)
-            await bot.send_message(chat_id=chat_id, text=plain)
+            await target.send_message(chat_id=chat_id, text=plain)
         except Exception as e2:
             logger.warning("[AGENT] TG send failed: %s", e2)
 
@@ -263,18 +266,27 @@ def _fmt_buy_alert(outcome: str, fill_price: float, edge: float,
 def _fmt_sell_alert(outcome: str, sell_price: float, buy_price: float,
                     shares: float, pnl: float, slug: str,
                     btc_entry: float, btc_exit: float, entry_ist: str) -> str:
-    win         = pnl >= 0
-    result_text = "✅ *WIN (TP)*" if win and pnl > 0 else ("🛑 *STOP LOSS*" if pnl < 0 else "⚖️ *NEUTRAL*")
-    pnl_sign    = "+" if win else "\\-"
-    roi         = (pnl / (buy_price * shares) * 100) if (buy_price * shares > 0) else 0
-    balance     = db.get_paper_balance(AGENT_USER_ID)
+    # Determine result label
+    if pnl > 0.01:
+        result_text = "✅ *WIN / TP*"
+        pnl_sign = "+"
+    elif pnl < -0.01:
+        result_text = "🛑 *STOP LOSS*"
+        pnl_sign = "\\-"
+    else:
+        result_text = "⚖️ *NEUTRAL*"
+        pnl_sign = ""
+
+    roi     = (pnl / (buy_price * shares) * 100) if (buy_price * shares > 0) else 0
+    balance = db.get_paper_balance(AGENT_USER_ID)
+    
     return (
         f"🤖 *AUTO SELL — {result_text}*\n\n"
-        f"📊 *Market:* BTC {_esc(_et_label(slug))} \\| *Dir:* *{_esc(outcome.upper())}*\n"
+        f"📊 *Market:* BTC {_esc(_et_label(slug))}  Dir: *{_esc(outcome.upper())}*\n"
         f"💰 *Price:* `${_esc_code(f'{buy_price:.4f}')}` → `${_esc_code(f'{sell_price:.4f}')}`\n"
         f"💵 *PnL:* `{pnl_sign}${_esc_code(f'{abs(float(pnl)):.2f}')}` \\({_esc_code(f'{pnl_sign}{abs(float(roi)):.1f}%')} ROI\\)\n"
         f"₿ *BTC:* `{_esc_code(f'${btc_entry:,.0f}')}` → `{_esc_code(f'${btc_exit:,.0f}')}`\n"
-        f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L` \\| Bal: `${_esc_code(f'{balance:.2f}')}`\n"
+        f"🏆 *Session:* `{_s.session_wins}W` / `{_s.session_losses}L`  Bal: `${_esc_code(f'{balance:.2f}')}`\n"
         f"⏰ `{_esc_code(_now_ist_str())}`"
     )
 
@@ -321,8 +333,14 @@ async def _attempt_sell(bot, slug: str, outcome: str,
 
     if ok:
         sell_price = buy_price
-        m = re.search(r"@\s*\$([0-9.]+)", msg_str)
-        if m: sell_price = float(m.group(1))
+        # Clean up Markdown formatting from core message for parsing
+        msg_str = str(msg).replace("\\", "").replace("`", "")
+        # Look for share price fill (e.g. "@ $0.5000")
+        m = re.search(r"@\s*\$?([0-9.]+)", msg_str)
+        if m:
+            sell_price = float(m.group(1))
+        else:
+            logger.warning("[AGENT] Could not parse sell price from message: %s", msg_str)
         
         pnl = (sell_price - buy_price) * shares
         if pnl >= 0: _s.session_wins += 1; _s.consecutive_losses = 0
@@ -343,7 +361,11 @@ async def _cycle(bot) -> None:
     now_ts = time.time()
     if int(now_ts) % 60 == 0:
         bal = db.get_paper_balance(AGENT_USER_ID)
-        logger.info("[AGENT] Evaluation loop: holding=%s portfolio=$%.2f", _s.current_slug or "None", bal)
+        mp, edge, _ = _compute_signal()
+        logger.info("[AGENT] Evaluation loop: holding=%s portfolio=$%.2f signal=%s edge=%s", 
+                    _s.current_slug or "None", bal, 
+                    f"{mp:.3f}" if mp else "N/A", 
+                    f"{edge:.1%}" if edge else "N/A")
 
     # Daily risk check
     today = _now_utc().date()
