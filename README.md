@@ -205,6 +205,24 @@ polytrack/
 
 ---
 
+
+---
+
+## TO RESET AGENT FUND
+To ADD $1000 to the current balance:
+powershell
+```
+python -c "import db; b = db.get_paper_balance(999999); db.update_paper_balance(999999, b + 1000.0); print(f'New Balance: ${db.get_paper_balance(999999):.2f}')"
+```
+2. To RESET the balance exactly to $1000:
+powershell
+```
+python -c "import db; db.update_paper_balance(999999, 1000.0); print('Balance reset to $1000.00')"
+```
+Note: The ID 999999 is the specific internal ID used for the Auto-Trading Agent. Any changes you make here will immediately reflect in the next trade alert or status update!
+
+---
+
 some more features are coming soon
 
 ## 📜 License
