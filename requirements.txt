@@ -1,4 +1,14 @@
 python-telegram-bot[job-queue]==21.9
 python-dotenv==1.0.1
-aiohttp==3.10.10
-//we should add some logics like formula for this
+aiohttp==3.11.11
+websockets==14.2
+web3==7.6.1
+matplotlib==3.10.0
+numpy==2.2.3
+pandas==2.2.3
+apscheduler==3.11.0
+requests==2.32.3
+scikit-learn==1.6.1
+xgboost==2.1.4
+pytz==2024.2
+tzdata

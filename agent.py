@@ -398,7 +398,7 @@ async def _cycle(bot) -> None:
                                 idx = 0 if str(_s.current_outcome).lower() in ("up", "yes") else 1
                                 if idx >= 0 and tids:
                                     cp = await _get_clob_price(session, tids[idx], "buy")
-                                    if cp > 0:
+                                    if cp is not None and cp > 0:
                                         roi = (cp - _s.current_buy_price) / _s.current_buy_price
                                         if roi >= TAKE_PROFIT_PCT or roi <= -STOP_LOSS_PCT:
                                             logger.info("[AGENT] HFT EXIT Triggered: ROI=%.1f%%", roi*100)
