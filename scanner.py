@@ -152,146 +152,158 @@ async def run_block_scanner(app):
         
     logger.info(f"🚀 Block scanner started from block {start_block}")
     
-    while True:
-        try:
-            latest_block = w3.eth.block_number
-            if start_block > latest_block:
-                await asyncio.sleep(2)
-                continue
-            
-            # Re-fetch wallets every loop so if users add/drop we catch it
-            wallets_rows = get_all_wallets()
-            if not wallets_rows:
-                # No one watching anything, just move cursor forward and chill
-                start_block = latest_block + 1
-                await asyncio.sleep(5)
-                continue
+    try:
+        while True:
+            try:
+                latest_block = w3.eth.block_number
+                if start_block > latest_block:
+                    await asyncio.sleep(2)
+                    continue
                 
-            # Build quick-lookup dictionary for watched addresses
-            # Use lowercase for dict keys just in case
-            tracked_wallets = {}
-            for row in wallets_rows:
-                addr = row['wallet_address'].lower()
-                if addr not in tracked_wallets:
-                    tracked_wallets[addr] = []
-                tracked_wallets[addr].append(row)
+                # Re-fetch wallets every loop so if users add/drop we catch it
+                wallets_rows = get_all_wallets()
+                if not wallets_rows:
+                    # No one watching anything, just move cursor forward and chill
+                    start_block = latest_block + 1
+                    await asyncio.sleep(5)
+                    continue
+                    
+                # Build quick-lookup dictionary for watched addresses
+                # Use lowercase for dict keys just in case
+                tracked_wallets = {}
+                for row in wallets_rows:
+                    addr = row['wallet_address'].lower()
+                    if addr not in tracked_wallets:
+                        tracked_wallets[addr] = []
+                    tracked_wallets[addr].append(row)
 
-            # Max blocks to fetch at once to prevent RPC timeouts
-            end_block = min(start_block + 500, latest_block)
-            
-            # logger.debug(f"Scanning blocks {start_block} to {end_block}")
-            
-            logs = w3.eth.get_logs({
-                'address': CTF_CONTRACT,
-                'fromBlock': start_block,
-                'toBlock': end_block,
-                'topics': [TRANSFER_SINGLE_TOPIC]
-            })
-            
-            for log in logs:
-                _from = ('0x' + log['topics'][2].hex()[-40:]).lower()
-                _to   = ('0x' + log['topics'][3].hex()[-40:]).lower()
+                # Max blocks to fetch at once to prevent RPC timeouts
+                end_block = min(start_block + 500, latest_block)
                 
-                matches = []
-                if _to in tracked_wallets:
-                    for row in tracked_wallets[_to]:
-                        matches.append((row, "BUY"))
-                if _from in tracked_wallets:
-                    for row in tracked_wallets[_from]:
-                        matches.append((row, "SELL"))
-                        
-                if matches:
-                    token_id = int.from_bytes(log['data'][:32], 'big')
-                    raw_amount = int.from_bytes(log['data'][32:], 'big') / 1_000_000.0
-                    if raw_amount <= 0:
-                        continue
-
-                    tx_hash = log['transactionHash'].hex()
-                    ts = int(datetime.now(timezone.utc).timestamp())
-
-                    # Use the tracked wallet address for the API call.
-                    # BUY  → tracked wallet is in _to  (receiving shares)
-                    # SELL → tracked wallet is in _from (sending shares)
-                    primary_wallet = matches[0][0]["wallet_address"]
-
-                    # ── Fetch accurate trade data from Polymarket Data API ──
-                    # This gives us correct title, outcome, price and USDC size
-                    # instead of relying on the incomplete on-chain token cache.
-                    api_trade = await _fetch_api_trade(primary_wallet, str(token_id))
-
-                    if api_trade:
-                        api_type    = parse_trade_type(api_trade)
-                        api_size    = parse_trade_size(api_trade)
-                        api_price   = parse_trade_price(api_trade)
-                        api_usd     = parse_trade_usd_value(api_trade)
-                        api_outcome = parse_trade_outcome(api_trade)
-                        api_title   = get_trade_title(api_trade) or "Unknown Market"
-                        api_ts      = parse_trade_timestamp(api_trade) or ts
-                        logger.info(
-                            "⚡ API trade matched: %s %s %.2f USDC on %s",
-                            api_type, api_outcome, api_usd, api_title[:40],
-                        )
-                    else:
-                        # Fallback to raw on-chain data (no title/outcome available)
-                        market_info = await fetch_market_info(str(token_id), primary_wallet)
-                        api_type    = None
-                        api_size    = raw_amount
-                        api_price   = market_info["price"]
-                        api_usd     = raw_amount * api_price
-                        api_outcome = market_info["outcome"]
-                        api_title   = market_info["title"]
-                        api_ts      = ts
-                        logger.warning(
-                            "⚠️ API trade not found for token %s wallet %s — using raw on-chain data",
-                            token_id, primary_wallet[:10],
-                        )
-
-                    for row, side in matches:
-                        trade_type = api_type or side  # API type takes priority
-                        # Filters checks
-                        if row['only_buys'] and trade_type != "BUY":
-                            continue
-                        if api_usd < row['min_usd_threshold']:
-                            continue
-
-                        # Build Alert
-                        poly_url = f"https://polymarket.com/profile/{row['wallet_address']}?tab=activity"
-
-                        msg = format_trade_alert(
-                            trade_type     = trade_type,
-                            size           = api_size,
-                            price          = api_price,
-                            usd_value      = api_usd,
-                            outcome        = api_outcome,
-                            market_title   = api_title,
-                            wallet_address = row['wallet_address'],
-                            nickname       = row['nickname'],
-                            timestamp      = api_ts,
-                            polymarket_url = poly_url,
-                        )
-
-                        logger.info(
-                            "⚡ FAST ALERT 🔥: %s %s $%.2f on %s for chat %s",
-                            trade_type, api_outcome, api_usd, api_title[:30], row['chat_id'],
-                        )
-
-                        try:
-                            await app.bot.send_message(
-                                chat_id=row['chat_id'],
-                                text=msg,
-                                parse_mode='MarkdownV2',
-                                disable_web_page_preview=True
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to send fast alert: {e}")
+                # logger.debug(f"Scanning blocks {start_block} to {end_block}")
+                
+                logs = w3.eth.get_logs({
+                    'address': CTF_CONTRACT,
+                    'fromBlock': start_block,
+                    'toBlock': end_block,
+                    'topics': [TRANSFER_SINGLE_TOPIC]
+                })
+                
+                for log in logs:
+                    _from = ('0x' + log['topics'][2].hex()[-40:]).lower()
+                    _to   = ('0x' + log['topics'][3].hex()[-40:]).lower()
+                    
+                    matches = []
+                    if _to in tracked_wallets:
+                        for row in tracked_wallets[_to]:
+                            matches.append((row, "BUY"))
+                    if _from in tracked_wallets:
+                        for row in tracked_wallets[_from]:
+                            matches.append((row, "SELL"))
                             
-            # Update cursor and wait for next Polygon block (~2.5s)
-            start_block = end_block + 1
-            await asyncio.sleep(2.5)
+                    if matches:
+                        token_id = int.from_bytes(log['data'][:32], 'big')
+                        raw_amount = int.from_bytes(log['data'][32:], 'big') / 1_000_000.0
+                        if raw_amount <= 0:
+                            continue
 
-        except Web3Exception as we:
-            logger.warning(f"Web3 RPC Error: {we}")
-            await asyncio.sleep(5)
-        except Exception as e:
-            logger.error(f"Scan loop error: {e}", exc_info=True)
-            await asyncio.sleep(5)
+                        tx_hash = log['transactionHash'].hex()
+                        ts = int(datetime.now(timezone.utc).timestamp())
+
+                        # Use the tracked wallet address for the API call.
+                        # BUY  → tracked wallet is in _to  (receiving shares)
+                        # SELL → tracked wallet is in _from (sending shares)
+                        primary_wallet = matches[0][0]["wallet_address"]
+
+                        # ── Fetch accurate trade data from Polymarket Data API ──
+                        # This gives us correct title, outcome, price and USDC size
+                        # instead of relying on the incomplete on-chain token cache.
+                        api_trade = await _fetch_api_trade(primary_wallet, str(token_id))
+
+                        if api_trade:
+                            api_type    = parse_trade_type(api_trade)
+                            api_size    = parse_trade_size(api_trade)
+                            api_price   = parse_trade_price(api_trade)
+                            api_usd     = parse_trade_usd_value(api_trade)
+                            api_outcome = parse_trade_outcome(api_trade)
+                            api_title   = get_trade_title(api_trade) or "Unknown Market"
+                            api_ts      = parse_trade_timestamp(api_trade) or ts
+                            logger.info(
+                                "⚡ API trade matched: %s %s %.2f USDC on %s",
+                                api_type, api_outcome, api_usd, api_title[:40],
+                            )
+                        else:
+                            # Fallback to raw on-chain data (no title/outcome available)
+                            market_info = await fetch_market_info(str(token_id), primary_wallet)
+                            api_type    = None
+                            api_size    = raw_amount
+                            api_price   = market_info["price"]
+                            api_usd     = raw_amount * api_price
+                            api_outcome = market_info["outcome"]
+                            api_title   = market_info["title"]
+                            api_ts      = ts
+                            logger.warning(
+                                "⚠️ API trade not found for token %s wallet %s — using raw on-chain data",
+                                token_id, primary_wallet[:10],
+                            )
+
+                        for row, side in matches:
+                            trade_type = api_type or side  # API type takes priority
+                            # Filters checks
+                            if row['only_buys'] and trade_type != "BUY":
+                                continue
+                            if api_usd < row['min_usd_threshold']:
+                                continue
+
+                            # Build Alert
+                            poly_url = f"https://polymarket.com/profile/{row['wallet_address']}?tab=activity"
+
+                            msg = format_trade_alert(
+                                trade_type     = trade_type,
+                                size           = api_size,
+                                price          = api_price,
+                                usd_value      = api_usd,
+                                outcome        = api_outcome,
+                                market_title   = api_title,
+                                wallet_address = row['wallet_address'],
+                                nickname       = row['nickname'],
+                                timestamp      = api_ts,
+                                polymarket_url = poly_url,
+                            )
+
+                            logger.info(
+                                "⚡ FAST ALERT 🔥: %s %s $%.2f on %s for chat %s",
+                                trade_type, api_outcome, api_usd, api_title[:30], row['chat_id'],
+                            )
+
+                            try:
+                                await app.bot.send_message(
+                                    chat_id=row['chat_id'],
+                                    text=msg,
+                                    parse_mode='MarkdownV2',
+                                    disable_web_page_preview=True
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to send fast alert: {e}")
+                                
+                # Update cursor and wait for next Polygon block (~2.5s)
+                start_block = end_block + 1
+                await asyncio.sleep(2.5)
+
+            except Web3Exception as we:
+                logger.warning(f"Web3 RPC Error: {we}")
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Scan loop error: {e}", exc_info=True)
+                await asyncio.sleep(5)
+    finally:
+        if _cacher_task:
+            _cacher_task.cancel()
+            try:
+                await _cacher_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Block scanner: shut down and cleaned up.")
+
