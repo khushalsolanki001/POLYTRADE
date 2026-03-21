@@ -827,7 +827,7 @@ def build_add_wallet_conversation() -> ConversationHandler:
             menu_fallback,
         ],
         allow_reentry=True,
-        per_message=False,
+        per_message=True,
         name="add_wallet_conv",
     )
 
