@@ -87,19 +87,22 @@ async def fetch_market_info(asset_id: str, address: str = ""):
 async def run_market_cacher():
     """Continuously fetches all active markets from CLOB API to populate _asset_cache."""
     logger.info("🚀 Starting background Token Cacher...")
+    # Brief startup pause so the bot is fully ready before we start paginating
+    await asyncio.sleep(5)
     while True:
         try:
             url = "https://clob.polymarket.com/markets?active=true"
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 while url:
-                    async with session.get(url, timeout=10) as resp:
+                    async with session.get(url) as resp:
                         if resp.status != 200:
                             break
                         data = await resp.json()
                         markets = data.get('data', [])
                         if not markets:
                             break
-                        
+
                         for m in markets:
                             title = m.get('question') or m.get('title') or 'Unknown Market'
                             for t in m.get('tokens', []):
@@ -110,25 +113,33 @@ async def run_market_cacher():
                                         "outcome": str(t.get('outcome', '?')),
                                         "price": float(t.get('price', 0.5))
                                     }
-                                    
+
                         next_cursor = data.get('next_cursor')
                         if not next_cursor or next_cursor == "Mw==":
                             break
                         url = f"https://clob.polymarket.com/markets?active=true&next_cursor={next_cursor}"
-                        
-            # Sleep 60s before re-syncing to avoid slamming CLOB
-            await asyncio.sleep(60)
+                        # Yield control between pages to avoid starving other tasks
+                        await asyncio.sleep(0)
+
+            logger.info("Token cacher: cache populated with %d assets. Sleeping 120s.", len(_asset_cache))
+            # Sleep before re-syncing to avoid slamming CLOB
+            await asyncio.sleep(120)
         except asyncio.CancelledError:
-            break
+            logger.info("Token cacher: cancelled cleanly.")
+            return
         except Exception as e:
-            logger.error(f"Token cacher error: {e}")
+            logger.error("Token cacher error: %s", e)
             await asyncio.sleep(15)
+
+
+_cacher_task: asyncio.Task | None = None
 
 async def run_block_scanner(app):
     """Background task to scan blocks every 3 seconds for instant alerts."""
-    
-    # Start the token cacher alongside scanning
-    asyncio.create_task(run_market_cacher())
+    global _cacher_task
+
+    # Start the token cacher as a tracked task so we can cancel it cleanly
+    _cacher_task = asyncio.create_task(run_market_cacher())
     
     w3 = get_w3()
     
