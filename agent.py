@@ -717,7 +717,7 @@ async def _cycle(bot) -> None:
         logger.info("[AGENT] 🔒 Window already traded: %s", slug[-25:])
         return
 
-    # Entry timing: 30s – 240s into the window
+    # Entry timing: 30s – 265s into the window (leaves ~35s minimum hold before expiry)
     age = _window_age_secs(slug)
     if age is None:
         logger.info("[AGENT] Window age unknown for %s — skip", slug[-25:])
@@ -725,8 +725,11 @@ async def _cycle(bot) -> None:
     if age < 30:
         logger.debug("[AGENT] Too early to enter: %.0fs into window", age)
         return
-    if age > 240:
-        logger.info("[AGENT] ⏰ Window too old (%.0fs) to enter safely — skip", age)
+    if age > 265:
+        logger.info(
+            "[AGENT] ⏰ Window too old (%.0fs elapsed, %.0fs remaining) — skip entry",
+            age, WINDOW_SECS - age,
+        )
         return
 
     m_prob, e_val, raw_factor = _compute_signal()
