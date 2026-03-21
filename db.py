@@ -87,11 +87,32 @@ def init_db() -> None:
                 pnl           REAL NOT NULL,
                 closed_at     TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key           TEXT PRIMARY KEY,
+                value         TEXT
+            );
         """)
         conn.commit()
         logger.info("✅ Database initialised at '%s'", DB_PATH)
     finally:
         conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Settings helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    """Get a value from the settings table."""
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+def set_setting(key: str, value: str) -> None:
+    """Set a value in the settings table."""
+    with _connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
