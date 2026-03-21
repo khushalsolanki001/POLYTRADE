@@ -6,7 +6,7 @@ import aiohttp
 from datetime import datetime, timezone
 import json
 
-from db import get_all_wallets, update_last_timestamp
+from db import get_all_wallets, update_last_timestamp, get_setting, set_setting
 from handlers import format_trade_alert
 from api import (
     fetch_trades, get_trade_title,
@@ -143,14 +143,19 @@ async def run_block_scanner(app):
     
     w3 = get_w3()
     
-    # We start searching from 5 blocks behind current to catch up
-    try:
-        start_block = w3.eth.block_number - 5
-    except Exception as e:
-        logger.error(f"Failed to get initial block number: {e}")
-        start_block = 0
-        
-    logger.info(f"🚀 Block scanner started from block {start_block}")
+    # Try to load last block from DB
+    last_saved_block = get_setting("last_scanned_block")
+    if last_saved_block:
+        start_block = int(last_saved_block)
+        logger.info(f"🚀 Block scanner resuming from DB block {start_block}")
+    else:
+        # We start searching from 5 blocks behind current to catch up
+        try:
+            start_block = w3.eth.block_number - 5
+            logger.info(f"🚀 Block scanner started from block {start_block} (default -5)")
+        except Exception as e:
+            logger.error(f"Failed to get initial block number: {e}")
+            start_block = 0
     
     try:
         while True:
@@ -288,6 +293,7 @@ async def run_block_scanner(app):
                                 
                 # Update cursor and wait for next Polygon block (~2.5s)
                 start_block = end_block + 1
+                set_setting("last_scanned_block", str(start_block))
                 await asyncio.sleep(2.5)
 
             except Web3Exception as we:
