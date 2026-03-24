@@ -33,6 +33,7 @@ import websockets  # type: ignore
 from dotenv import load_dotenv  # type: ignore
 
 import db  # type: ignore
+import api  # type: ignore
 from handlers import (  # type: ignore
     _paper_buy_core,
     _paper_sell_core,
@@ -329,8 +330,16 @@ def _recover_orphaned_position() -> None:
     """
     On startup: if the DB has an open agent position from a previous run,
     re-register it in _s so the auto-sell logic can close it properly.
+    Also restores recently traded slugs to prevent immediate re-entry.
     """
     try:
+        # 1. Recover recently traded slugs to prevent duplicate entry after restart
+        recent_slugs = db.get_recent_traded_slugs(AGENT_USER_ID, limit=50)
+        _s.traded_slugs.update(recent_slugs)
+        if recent_slugs:
+            logger.info("[AGENT] Recovered %d recently traded slugs from DB", len(recent_slugs))
+
+        # 2. Recover live position
         positions = db.get_all_paper_positions(AGENT_USER_ID)
         if positions:
             p = positions[0]  # take the most recent
@@ -568,35 +577,33 @@ async def _check_scalp_exit(bot) -> bool:
 
     # ── API check + exit logic ────────────────────────────────────────────────
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=8)
-        ) as session:
-            async with session.get(GAMMA_API_URL.format(slug=slug)) as r:
-                if r.status != 200:
-                    if window_expired:
-                        logger.warning("[AGENT] Window expired + API unreachable → force sell")
-                        _s.sell_in_progress = True
-                        try:
-                            return await _do_sell()
-                        finally:
-                            _s.sell_in_progress = False
-                    return False
-
-                data    = await r.json()
-                markets = data[0].get("markets", []) if data else []
-                if not markets:
-                    return False
-
-                m = markets[0]
-
-                # ── Market resolved → sell immediately ────────────────────
-                if m.get("closed") or m.get("active") is False:
-                    logger.info("[AGENT] Market resolved → sell")
+        session = await api.get_session()
+        async with session.get(GAMMA_API_URL.format(slug=slug)) as r:
+            if r.status != 200:
+                if window_expired:
+                    logger.warning("[AGENT] Window expired + API unreachable → force sell")
                     _s.sell_in_progress = True
                     try:
                         return await _do_sell()
                     finally:
                         _s.sell_in_progress = False
+                return False
+
+            data    = await r.json()
+            markets = data[0].get("markets", []) if data else []
+            if not markets:
+                return False
+
+            m = markets[0]
+
+            # ── Market resolved → sell immediately ────────────────────
+            if m.get("closed") or m.get("active") is False:
+                logger.info("[AGENT] Market resolved → sell")
+                _s.sell_in_progress = True
+                try:
+                    return await _do_sell()
+                finally:
+                    _s.sell_in_progress = False
 
                 # ── CLOB price → HFT scalp exit ───────────────────────────
                 if m.get("clobTokenIds"):
