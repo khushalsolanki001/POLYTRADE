@@ -288,3 +288,14 @@ def get_all_paper_positions(user_id: int) -> list[sqlite3.Row]:
         return conn.execute("""
             SELECT * FROM paper_positions WHERE user_id = ? AND shares > 0 ORDER BY created_at DESC
         """, (user_id,)).fetchall()
+
+def get_recent_traded_slugs(user_id: int, limit: int = 50) -> set[str]:
+    """Retrieves the most recent market slugs traded by the user."""
+    with _connect() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT market_slug FROM paper_trade_history 
+            WHERE user_id = ? 
+            ORDER BY closed_at DESC 
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+        return {row["market_slug"] for row in rows}
