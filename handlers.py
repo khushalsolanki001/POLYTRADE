@@ -1288,12 +1288,12 @@ async def _get_market_data(url: str) -> dict | None:
     match = re.search(r'polymarket\.com/event/([^/?#]+)', url)
     if not match: return None
     slug = match.group(1)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
-            if resp.status != 200: return None
-            data = await resp.json()
-            if not data or not isinstance(data, list): return None
-            return data[0]
+    session = await api.get_session()
+    async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
+        if resp.status != 200: return None
+        data = await resp.json()
+        if not data or not isinstance(data, list): return None
+        return data[0]
 
 async def _get_clob_price(session: aiohttp.ClientSession, token_id: str, side: str) -> float | None:
     """
@@ -1388,10 +1388,10 @@ async def _paper_buy_core(user_id: int, outcome: str, amount_usd: float, slug_ov
     price = None
     price_source = "gamma"
     if token_ids and idx < len(token_ids):
-        async with aiohttp.ClientSession() as session:
-            price = await _get_clob_price(session, token_ids[idx], "sell")
-            if price is not None:
-                price_source = "clob"
+        session = await api.get_session()
+        price = await _get_clob_price(session, token_ids[idx], "sell")
+        if price is not None:
+            price_source = "clob"
     
     # Fallback to Gamma API price
     if price is None:
@@ -1493,12 +1493,12 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
 
     market = None
     api_url = GAMMA_API_URL.format(slug=slug)
-    async with aiohttp.ClientSession() as session:
-        async with session.get(api_url) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and isinstance(data, list) and data[0].get("markets"):
-                    market = data[0]["markets"][0]
+    session = await api.get_session()
+    async with session.get(api_url) as resp:
+        if resp.status == 200:
+            data = await resp.json()
+            if data and isinstance(data, list) and data[0].get("markets"):
+                market = data[0]["markets"][0]
 
     if not market:
         return False, "Could not load market data for your position\\."
@@ -1517,10 +1517,10 @@ async def _paper_sell_core(user_id: int, outcome: str, shares_to_sell: float | N
     price = None
     price_source = "gamma"
     if tradeable and token_ids and idx < len(token_ids):
-        async with aiohttp.ClientSession() as session:
-            price = await _get_clob_price(session, token_ids[idx], "buy")
-            if price is not None:
-                price_source = "clob"
+        session = await api.get_session()
+        price = await _get_clob_price(session, token_ids[idx], "buy")
+        if price is not None:
+            price_source = "clob"
     
     if price is None:
         gamma_price = float(gamma_prices[idx]) if gamma_prices and idx < len(gamma_prices) else -1
@@ -1637,74 +1637,74 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
     sold_lines = []
     balance = db.get_paper_balance(user_id)
 
-    async with aiohttp.ClientSession() as session:
-        for p in positions:
-            slug = p["market_slug"]
-            outcome = p["outcome"]
-            shares = p["shares"]
-            avg_price = p["avg_price"]
+    session = await api.get_session()
+    for p in positions:
+        slug = p["market_slug"]
+        outcome = p["outcome"]
+        shares = p["shares"]
+        avg_price = p["avg_price"]
 
-            # Try to get live BID price from CLOB
-            price = None
-            price_source = "gamma"
-            tradeable = True
-            try:
-                api_url = GAMMA_API_URL.format(slug=slug)
-                async with session.get(api_url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and isinstance(data, list) and data[0].get("markets"):
-                            market = data[0]["markets"][0]
-                            tradeable = _is_market_tradeable(market)
-                            outcomes_list = json.loads(market.get("outcomes", "[]"))
-                            token_ids = json.loads(market.get("clobTokenIds", "[]"))
-                            gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
-                            idx = _find_outcome_index(outcomes_list, outcome)
-                            if idx is not None:
-                                # Try CLOB BID price first
-                                if tradeable and token_ids and idx < len(token_ids):
-                                    price = await _get_clob_price(session, token_ids[idx], "buy")
-                                    if price is not None:
-                                        price_source = "clob"
-                                # Fallback to Gamma
-                                if price is None and gamma_prices_list and idx < len(gamma_prices_list):
-                                    gp = float(gamma_prices_list[idx])
-                                    if not tradeable:
-                                        if gp in (0.0, 1.0):
-                                            price = gp
-                                            price_source = "resolved payout"
-                                    elif 0 <= gp <= 1:
+        # Try to get live BID price from CLOB
+        price = None
+        price_source = "gamma"
+        tradeable = True
+        try:
+            api_url = GAMMA_API_URL.format(slug=slug)
+            async with session.get(api_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and isinstance(data, list) and data[0].get("markets"):
+                        market = data[0]["markets"][0]
+                        tradeable = _is_market_tradeable(market)
+                        outcomes_list = json.loads(market.get("outcomes", "[]"))
+                        token_ids = json.loads(market.get("clobTokenIds", "[]"))
+                        gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
+                        idx = _find_outcome_index(outcomes_list, outcome)
+                        if idx is not None:
+                            # Try CLOB BID price first
+                            if tradeable and token_ids and idx < len(token_ids):
+                                price = await _get_clob_price(session, token_ids[idx], "buy")
+                                if price is not None:
+                                    price_source = "clob"
+                            # Fallback to Gamma
+                            if price is None and gamma_prices_list and idx < len(gamma_prices_list):
+                                gp = float(gamma_prices_list[idx])
+                                if not tradeable:
+                                    if gp in (0.0, 1.0):
                                         price = gp
-            except Exception:
-                pass
+                                        price_source = "resolved payout"
+                                elif 0 <= gp <= 1:
+                                    price = gp
+        except Exception:
+            pass
 
-            if price is None:
-                if not tradeable:
-                    title_short = (p["market_title"] or "Unknown")[:35]
-                    sold_lines.append(f"  • {_esc(outcome)} in `{_esc_code(title_short)}` — "
-                                      f"Skipped: Market ended, awaiting resolution")
-                    continue
-                else:
-                    price = avg_price  # worst case fallback: sell at your buy price
-                    price_source = "fallback"
+        if price is None:
+            if not tradeable:
+                title_short = (p["market_title"] or "Unknown")[:35]
+                sold_lines.append(f"  • {_esc(outcome)} in `{_esc_code(title_short)}` — "
+                                  f"Skipped: Market ended, awaiting resolution")
+                continue
+            else:
+                price = avg_price  # worst case fallback: sell at your buy price
+                price_source = "fallback"
 
-            price_val = float(price if price is not None else p["avg_price"])
-            proceeds = float(shares) * price_val
-            pnl = (price_val - float(p["avg_price"])) * float(shares)
-            total_proceeds += float(proceeds)
-            total_pnl += float(pnl)
+        price_val = float(price if price is not None else p["avg_price"])
+        proceeds = float(shares) * price_val
+        pnl = (price_val - float(p["avg_price"])) * float(shares)
+        total_proceeds += float(proceeds)
+        total_pnl += float(pnl)
 
-            # Remove position from DB
-            db.remove_paper_position(p["id"])
-            db.add_trade_history(user_id, slug, outcome, avg_price, price, shares, pnl)
+        # Remove position from DB
+        db.remove_paper_position(p["id"])
+        db.add_trade_history(user_id, slug, outcome, avg_price, price, shares, pnl)
 
-            pnl_sign = "+" if pnl >= 0 else "-"
-            title_short = (p["market_title"] or "Unknown")[:35]
-            sold_lines.append(
-                f"  • {_esc(outcome)} in `{_esc_code(title_short)}` — "
-                f"`{_esc_code(f'{shares:.2f}')}` sh @ `${_esc_code(f'{price:.4f}')}` "
-                f"→ `{_esc_code(f'{pnl_sign}${abs(pnl):.2f}')}`"
-            )
+        pnl_sign = "+" if pnl >= 0 else "-"
+        title_short = (p["market_title"] or "Unknown")[:35]
+        sold_lines.append(
+            f"  • {_esc(outcome)} in `{_esc_code(title_short)}` — "
+            f"`{_esc_code(f'{shares:.2f}')}` sh @ `${_esc_code(f'{price:.4f}')}` "
+            f"→ `{_esc_code(f'{pnl_sign}${abs(pnl):.2f}')}`"
+        )
 
     # Update balance
     new_balance = float(balance) + float(total_proceeds)
@@ -1753,50 +1753,50 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines = [f"\U0001fDDC *VIRTUAL PORTFOLIO*\n", f"\U0001f4b5 Cash: `${_esc_code(f'{balance:.2f}')}`\n"]
     total_val = balance
     
-    async with aiohttp.ClientSession() as session:
-        for p in positions:
-            curr_val = p['shares'] * p['avg_price'] # fallback
-            price_str = "UNKNOWN"
-            pnl_str = "$0.00 (+0.00%)"
-            
-            try:
-                # Fetch metadata+token IDs from Gamma, then midpoint from CLOB
-                async with session.get(GAMMA_API_URL.format(slug=p['market_slug'])) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and isinstance(data, list) and data[0].get("markets"):
-                            market = data[0]["markets"][0]
-                            outcomes = json.loads(market.get("outcomes", "[]"))
-                            token_ids = json.loads(market.get("clobTokenIds", "[]"))
-                            gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
-                            idx = _find_outcome_index(outcomes, p['outcome'])
-                            if idx is not None:
-                                # Use CLOB midpoint for fairest portfolio valuation
-                                curr_price = None
-                                if token_ids and idx < len(token_ids):
-                                    curr_price = await _get_clob_midpoint(session, token_ids[idx])
-                                # Fallback to Gamma cache price
-                                if curr_price is None and gamma_prices_list and idx < len(gamma_prices_list):
-                                    gp = float(gamma_prices_list[idx])
-                                    if 0 < gp < 1:
-                                        curr_price = gp
-                                if curr_price is not None:
-                                    curr_val = curr_price * p['shares']
-                                    cost = p['avg_price'] * p['shares']
-                                    pnl = curr_val - cost
-                                    pnl_pct = (pnl/cost)*100 if cost > 0 else 0
-                                    price_str = f"${curr_price:.4f}"
-                                    pnl_sign = "+" if pnl >= 0 else "-"
-                                    pnl_str = f"{pnl_sign}${abs(pnl):.2f} ({pnl_sign}{abs(pnl_pct):.1f}%)"
-            except Exception: pass
-            
-            total_val += curr_val
-            
-            title = p['market_title'][:40] + ("..." if len(p['market_title']) > 40 else "")
-            lines.append(f"\U0001f539 *{_esc(title)}*")
-            lines.append(f"  {_esc(p['outcome'])} \\| `{_esc_code(f'{p['shares']:.2f}')}` sh")
-            lines.append(f"  Avg: `${_esc_code(f'{p['avg_price']:.4f}')}` \\| Cur: `{_esc_code(price_str)}`")
-            lines.append(f"  Val: `${_esc_code(f'{curr_val:.2f}')}` \\| PnL: `{_esc_code(pnl_str)}`\n")
+    session = await api.get_session()
+    for p in positions:
+        curr_val = p['shares'] * p['avg_price'] # fallback
+        price_str = "UNKNOWN"
+        pnl_str = "$0.00 (+0.00%)"
+        
+        try:
+            # Fetch metadata+token IDs from Gamma, then midpoint from CLOB
+            async with session.get(GAMMA_API_URL.format(slug=p['market_slug'])) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and isinstance(data, list) and data[0].get("markets"):
+                        market = data[0]["markets"][0]
+                        outcomes = json.loads(market.get("outcomes", "[]"))
+                        token_ids = json.loads(market.get("clobTokenIds", "[]"))
+                        gamma_prices_list = json.loads(market.get("outcomePrices", "[]"))
+                        idx = _find_outcome_index(outcomes, p['outcome'])
+                        if idx is not None:
+                            # Use CLOB midpoint for fairest portfolio valuation
+                            curr_price = None
+                            if token_ids and idx < len(token_ids):
+                                curr_price = await _get_clob_midpoint(session, token_ids[idx])
+                            # Fallback to Gamma cache price
+                            if curr_price is None and gamma_prices_list and idx < len(gamma_prices_list):
+                                gp = float(gamma_prices_list[idx])
+                                if 0 < gp < 1:
+                                    curr_price = gp
+                            if curr_price is not None:
+                                curr_val = curr_price * p['shares']
+                                cost = p['avg_price'] * p['shares']
+                                pnl = curr_val - cost
+                                pnl_pct = (pnl/cost)*100 if cost > 0 else 0
+                                price_str = f"${curr_price:.4f}"
+                                pnl_sign = "+" if pnl >= 0 else "-"
+                                pnl_str = f"{pnl_sign}${abs(pnl):.2f} ({pnl_sign}{abs(pnl_pct):.1f}%)"
+        except Exception: pass
+        
+        total_val += curr_val
+        
+        title = p['market_title'][:40] + ("..." if len(p['market_title']) > 40 else "")
+        lines.append(f"\U0001f539 *{_esc(title)}*")
+        lines.append(f"  {_esc(p['outcome'])} \\| `{_esc_code(f'{p['shares']:.2f}')}` sh")
+        lines.append(f"  Avg: `${_esc_code(f'{p['avg_price']:.4f}')}` \\| Cur: `{_esc_code(price_str)}`")
+        lines.append(f"  Val: `${_esc_code(f'{curr_val:.2f}')}` \\| PnL: `{_esc_code(pnl_str)}`\n")
             
     total_pnl = total_val - 100.0
     pnl_sign = "+" if total_pnl >= 0 else "-"
