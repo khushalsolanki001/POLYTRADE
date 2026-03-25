@@ -120,6 +120,7 @@ class _State:
 
     # Sell-in-progress guard: prevent concurrent sell attempts
     sell_in_progress: bool     = False
+    last_heartbeat: float      = 0.0
 
 
 _s = _State()
@@ -224,8 +225,8 @@ def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]
     if not p1 or not p3:
         return None, None, None
 
-    mom1 = (now_p - p1) / p1
-    mom3 = (now_p - p3) / p3
+    mom1 = (now_p - p1) / p1 if p1 else 0.0
+    mom3 = (now_p - p3) / p3 if p3 else 0.0
 
     # Both must agree in direction
     if (mom1 >= 0) != (mom3 >= 0):
@@ -675,7 +676,8 @@ async def _cycle(bot) -> None:
 
     # Heartbeat (once per minute)
     now_ts = time.time()
-    if int(now_ts) % 60 == 0:
+    if int(now_ts) % 60 == 0 and now_ts - _s.last_heartbeat >= 50:
+        _s.last_heartbeat = now_ts
         bal = db.get_paper_balance(AGENT_USER_ID)
         mp, edge, _ = _compute_signal()
         logger.info(
