@@ -92,34 +92,34 @@ async def run_market_cacher():
     while True:
         try:
             url = "https://clob.polymarket.com/markets?active=true"
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                while url:
-                    async with session.get(url) as resp:
-                        if resp.status != 200:
-                            break
-                        data = await resp.json()
-                        markets = data.get('data', [])
-                        if not markets:
-                            break
+            import api
+            session = await api.get_session()
+            while url:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    markets = data.get('data', [])
+                    if not markets:
+                        break
 
-                        for m in markets:
-                            title = m.get('question') or m.get('title') or 'Unknown Market'
-                            for t in m.get('tokens', []):
-                                t_id = str(t.get('token_id', ''))
-                                if t_id:
-                                    _asset_cache[t_id] = {
-                                        "title": title,
-                                        "outcome": str(t.get('outcome', '?')),
-                                        "price": float(t.get('price', 0.5))
-                                    }
+                    for m in markets:
+                        title = m.get('question') or m.get('title') or 'Unknown Market'
+                        for t in m.get('tokens', []):
+                            t_id = str(t.get('token_id', ''))
+                            if t_id:
+                                _asset_cache[t_id] = {
+                                    "title": title,
+                                    "outcome": str(t.get('outcome', '?')),
+                                    "price": float(t.get('price', 0.5))
+                                }
 
-                        next_cursor = data.get('next_cursor')
-                        if not next_cursor or next_cursor == "Mw==":
-                            break
-                        url = f"https://clob.polymarket.com/markets?active=true&next_cursor={next_cursor}"
-                        # Yield control between pages to avoid starving other tasks
-                        await asyncio.sleep(0)
+                    next_cursor = data.get('next_cursor')
+                    if not next_cursor or next_cursor == "Mw==":
+                        break
+                    url = f"https://clob.polymarket.com/markets?active=true&next_cursor={next_cursor}"
+                    # Yield control between pages to avoid starving other tasks
+                    await asyncio.sleep(0)
 
             logger.info("Token cacher: cache populated with %d assets. Sleeping 120s.", len(_asset_cache))
             # Sleep before re-syncing to avoid slamming CLOB
