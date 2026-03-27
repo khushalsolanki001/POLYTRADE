@@ -62,7 +62,7 @@ async def fetch_market_info(asset_id: str, address: str = ""):
     if asset_id in _asset_cache:
         return _asset_cache[asset_id]
         
-    # Fallback to fetching recent trades of this user to find the title
+    # Fallback to fetching recent trades of this user to find the title.
     if address:
         try:
             trades = await fetch_trades(address, limit=30)
