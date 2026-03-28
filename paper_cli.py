@@ -50,7 +50,8 @@ async def buy(args):
     db.init_paper_user(DEFAULT_USER_ID)
     
     event = await get_market_data(args.url)
-    if not event: return
+    if not event:
+        return
     
     # We use the first market in the event for simplicity
     markets = event.get("markets", [])
@@ -113,7 +114,8 @@ async def sell(args):
     db.init_paper_user(DEFAULT_USER_ID)
     
     event = await get_market_data(args.url)
-    if not event: return
+    if not event:
+        return
     
     markets = event.get("markets", [])
     if not markets:
