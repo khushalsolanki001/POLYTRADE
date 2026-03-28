@@ -2,11 +2,9 @@ import asyncio
 import logging
 from web3 import Web3
 from web3.exceptions import Web3Exception
-import aiohttp
 from datetime import datetime, timezone
-import json
 
-from db import get_all_wallets, update_last_timestamp, get_setting, set_setting
+from db import get_all_wallets, get_setting, set_setting
 from handlers import format_trade_alert
 from api import (
     fetch_trades, get_trade_title,
