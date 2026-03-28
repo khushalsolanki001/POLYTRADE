@@ -1286,13 +1286,18 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
 async def _get_market_data(url: str) -> dict | None:
     """Fetch event+market metadata from Gamma API using the URL slug."""
     match = re.search(r'polymarket\.com/event/([^/?#]+)', url)
-    if not match: return None
+    if not match:
+        return None
     slug = match.group(1)
     session = await api.get_session()
     async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
-        if resp.status != 200: return None
+        if resp.status != 200:
+            return None
         data = await resp.json()
-        if not data or not isinstance(data, list): return None
+        if not data:
+            return None
+        if not isinstance(data, list):
+            return None
         return data[0]
 
 async def _get_clob_price(session: aiohttp.ClientSession, token_id: str, side: str) -> float | None:
@@ -1333,7 +1338,8 @@ async def _get_clob_midpoint(session: aiohttp.ClientSession, token_id: str) -> f
 def _find_outcome_index(outcomes: list[str], target: str) -> int | None:
     target_lower = target.lower()
     for i, o in enumerate(outcomes):
-        if o.lower() == target_lower: return i
+        if o.lower() == target_lower:
+            return i
     return None
 
 async def cmd_paper_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1785,7 +1791,8 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                                 price_str = f"${curr_price:.4f}"
                                 pnl_sign = "+" if pnl >= 0 else "-"
                                 pnl_str = f"{pnl_sign}${abs(pnl):.2f} ({pnl_sign}{abs(pnl_pct):.1f}%)"
-        except Exception: pass
+        except Exception:
+            pass
         
         total_val += curr_val
         
