@@ -248,7 +248,7 @@ def main():
     parser_sell.add_argument("shares", type=str, help="Number of shares to sell")
     
     # Portfolio command
-    parser_portfolio = subparsers.add_parser("portfolio", help="View your paper trading portfolio")
+    subparsers.add_parser("portfolio", help="View your paper trading portfolio")
     
     args = parser.parse_args()
     
