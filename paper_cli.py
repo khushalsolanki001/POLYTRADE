@@ -6,7 +6,6 @@ import re
 from typing import Optional
 
 # Fix Windows console encoding for emojis
-import sys
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
@@ -178,7 +177,7 @@ async def portfolio(args):
     positions = db.get_all_paper_positions(DEFAULT_USER_ID)
     
     print("\n" + "="*50)
-    print(f"📜 VIRTUAL PORTFOLIO")
+    print("📜 VIRTUAL PORTFOLIO")
     print("="*50)
     print(f"💵 Available Cash: ${balance:.2f}\n")
     
