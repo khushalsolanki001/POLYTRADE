@@ -12,7 +12,9 @@ Defines every handler that the ApplicationBuilder registers:
 """
 
 import re
+import os
 import logging
+import chart # type: ignore
 import time as _time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -1814,8 +1816,7 @@ async def cmd_agent_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     /agent_status — Show real-time status of the auto-trading agent.
     Only the owner (AGENT_CHAT_ID) can use this command.
     """
-    import os as _os
-    agent_chat_id = int(_os.getenv("AGENT_CHAT_ID", "0"))
+    agent_chat_id = int(os.getenv("AGENT_CHAT_ID", "0"))
     chat_id = update.effective_chat.id
 
     if agent_chat_id != 0 and chat_id != agent_chat_id:
@@ -1840,8 +1841,7 @@ async def cmd_agent_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     /agent_toggle — Pause or resume the auto-trading agent.
     Only the owner (AGENT_CHAT_ID) can use this command.
     """
-    import os as _os
-    agent_chat_id = int(_os.getenv("AGENT_CHAT_ID", "0"))
+    agent_chat_id = int(os.getenv("AGENT_CHAT_ID", "0"))
     chat_id = update.effective_chat.id
 
     if agent_chat_id != 0 and chat_id != agent_chat_id:
@@ -1869,8 +1869,6 @@ async def cmd_agent_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         plain = "Agent RESUMED." if new_state else "Agent PAUSED."
         await update.message.reply_text(plain)
 
-import chart # type: ignore
-import os
 
 async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate and send a visual PnL chart using the history DB."""
