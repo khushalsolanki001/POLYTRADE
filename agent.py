@@ -25,10 +25,9 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Optional, Tuple, Any, Set
+from typing import Optional, Tuple, Set
 from zoneinfo import ZoneInfo
 
-import aiohttp  # type: ignore
 import websockets  # type: ignore
 from dotenv import load_dotenv  # type: ignore
 
