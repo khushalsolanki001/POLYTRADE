@@ -145,9 +145,11 @@ class PolyProfitBot:
                             if mid:
                                 depth = 0
                                 for b in bids:
-                                    if float(b['price']) >= mid - 0.02: depth += float(b['size'])
+                                    if float(b['price']) >= mid - 0.02:
+                                        depth += float(b['size'])
                                 for a in asks:
-                                    if float(a['price']) <= mid + 0.02: depth += float(a['size'])
+                                    if float(a['price']) <= mid + 0.02:
+                                        depth += float(a['size'])
                                 self.clob_data[t_id]["depth"] = depth
 
             except Exception as e:
@@ -190,14 +192,16 @@ class PolyProfitBot:
     def calculate_momentum_p(self, symbol: str) -> float:
         """Calculate momentum probability: (P_now - P_1min_ago)/P_1min_ago * 12 + (P_now - P_3min_ago)/P_3min_ago * 8"""
         prices = self.prices.get(symbol, [])
-        if len(prices) < 20: return 0.5 # Need some history
+        if len(prices) < 20:
+            return 0.5  # Need some history
 
         now_t, now_p = prices[-1]
 
         def get_price_ago(seconds):
             target = now_t - seconds
             for t, p in reversed(prices):
-                if t <= target: return p
+                if t <= target:
+                    return p
             return prices[0][1]
 
         p_1min = get_price_ago(60)
@@ -240,18 +244,21 @@ class PolyProfitBot:
                 break
 
             tokens = self.market_tokens.get(c_id)
-            if not tokens: continue
+            if not tokens:
+                continue
 
             yes_id = tokens.get("YES")
             no_id = tokens.get("NO")
-            if not yes_id or yes_id not in self.clob_data: continue
+            if not yes_id or yes_id not in self.clob_data:
+                continue
 
             yes_data = self.clob_data[yes_id]
             mid = yes_data.get("mid")
             spread = yes_data.get("spread")
             depth = yes_data.get("depth", 0)
 
-            if not mid or not spread: continue
+            if not mid or not spread:
+                continue
 
             # 10. Special Edge: Arbitrage check
             if no_id in self.clob_data:
@@ -305,7 +312,8 @@ class PolyProfitBot:
     def execute_paper_trade(self, condition_id, direction, size, mid, edge):
         # 8. Simulate fill at mid + 0.005 slippage
         fill_price = mid + 0.005
-        if fill_price >= 0.99: return
+        if fill_price >= 0.99:
+            return
 
         logger.info(f"PAPER BUY {direction} ${size:.0f} at mid {mid:.4f} | edge {edge*100:.1f}% | estimated fill ≈ {fill_price:.4f} slippage")
 
@@ -321,7 +329,8 @@ class PolyProfitBot:
 
     async def resolve_paper_trade(self, condition_id, outcome="YES"):
         """Simulates market resolution."""
-        if condition_id not in self.open_positions: return
+        if condition_id not in self.open_positions:
+            return
 
         pos = self.open_positions.pop(condition_id)
         win = (pos["direction"] == outcome)
