@@ -88,7 +88,6 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timezone
 
 # Force UTF-8 output on Windows (avoids cp1252 UnicodeEncodeError for emoji in logs)
 if sys.stdout.encoding.lower() != "utf-8" and hasattr(sys.stdout, "reconfigure"):
