@@ -210,7 +210,7 @@ async def run_block_scanner(app):
                         if raw_amount <= 0:
                             continue
 
-                        tx_hash = log['transactionHash'].hex()
+                        log['transactionHash'].hex()
                         ts = int(datetime.now(timezone.utc).timestamp())
 
                         # Use the tracked wallet address for the API call.
