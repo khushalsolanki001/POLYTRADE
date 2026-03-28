@@ -3,7 +3,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import db
 from datetime import datetime
-import os
 
 def generate_pnl_chart(user_id: int, output_path: str = "chart.png") -> bool:
     trades = db.get_trade_history(user_id)
