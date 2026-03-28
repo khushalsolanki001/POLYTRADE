@@ -1644,7 +1644,6 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
 
         # Try to get live BID price from CLOB
         price = None
-        price_source = "gamma"
         tradeable = True
         try:
             api_url = GAMMA_API_URL.format(slug=slug)
@@ -1663,14 +1662,13 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
                             if tradeable and token_ids and idx < len(token_ids):
                                 price = await _get_clob_price(session, token_ids[idx], "buy")
                                 if price is not None:
-                                    price_source = "clob"
+                                    pass
                             # Fallback to Gamma
                             if price is None and gamma_prices_list and idx < len(gamma_prices_list):
                                 gp = float(gamma_prices_list[idx])
                                 if not tradeable:
                                     if gp in (0.0, 1.0):
                                         price = gp
-                                        price_source = "resolved payout"
                                 elif 0 <= gp <= 1:
                                     price = gp
         except Exception:
@@ -1684,7 +1682,6 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
                 continue
             else:
                 price = avg_price  # worst case fallback: sell at your buy price
-                price_source = "fallback"
 
         price_val = float(price if price is not None else p["avg_price"])
         proceeds = float(shares) * price_val
