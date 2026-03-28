@@ -5,12 +5,10 @@ import csv
 import os
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
 
-import aiohttp
 import websockets
 
-from db import get_all_wallets, init_db
+from db import init_db
 from api import get_crypto_price_markets, get_market_tokens
 
 # ─── Configuration ───────────────────────────────────────────────────────────
@@ -340,7 +338,7 @@ class PolyProfitBot:
 
             # 9. Risk Rules: Pause after 4 losses
             if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                logger.warning(f"🛑 4 losses in a row! Pausing trading for 10 minutes.")
+                logger.warning("🛑 4 losses in a row! Pausing trading for 10 minutes.")
                 self.pause_until = time.time() + PAUSE_DURATION
                 self.consecutive_losses = 0
 
