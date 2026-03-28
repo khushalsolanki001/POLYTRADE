@@ -22,11 +22,9 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
 )
 import aiohttp # type: ignore
 import json
-import re
 from telegram.ext import ( # type: ignore
     ContextTypes,
     ConversationHandler,
@@ -1712,7 +1710,7 @@ async def _paper_sellall_core(user_id: int) -> tuple[bool, str]:
 
     total_pnl_sign = "+" if float(total_pnl) >= 0 else "-"
     msg_lines = [
-        f"💣 *All Positions Sold\\!*\n",
+        "💣 *All Positions Sold\\!*\n",
         f"📦 *Positions closed:* {len(positions)}",
     ] + sold_lines + [
         f"\n💰 *Total Proceeds:* `${_esc_code(f'{total_proceeds:.2f}')}`",
@@ -1750,7 +1748,7 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         
     sent = await update.message.reply_text("Fetching live prices\\.\\.\\.", parse_mode="MarkdownV2")
     
-    lines = [f"\U0001fDDC *VIRTUAL PORTFOLIO*\n", f"\U0001f4b5 Cash: `${_esc_code(f'{balance:.2f}')}`\n"]
+    lines = ["\U0001fDDC *VIRTUAL PORTFOLIO*\n", f"\U0001f4b5 Cash: `${_esc_code(f'{balance:.2f}')}`\n"]
     total_val = balance
     
     session = await api.get_session()
