@@ -20,7 +20,7 @@ Confirmed API response shape (from live data-api.polymarket.com):
     ...
   }
 """
-
+# it was for api 
 import logging
 import asyncio
 from typing import Optional, Any
