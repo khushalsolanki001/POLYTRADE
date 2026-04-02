@@ -24,6 +24,8 @@ import logging
 import os
 import re
 import time
+import bisect
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Set
 from zoneinfo import ZoneInfo
@@ -98,6 +100,8 @@ class _State:
     current_btc_at_entry: float       = 0.0  # BTC spot price when we entered
     current_entry_time: float         = 0.0  # unix ts of entry
     current_entry_ist: str            = ""   # formatted IST string for display
+    current_token_id: Optional[str]   = None # CLOB token ID for tracking ROI fast
+    last_metadata_check: float        = 0.0  # throttle Gamma API calls (closed check)
 
     # Anti-duplicate: track which slugs we've already traded this session
     traded_slugs: Set[str]     = set()
@@ -120,6 +124,11 @@ class _State:
     # Sell-in-progress guard: prevent concurrent sell attempts
     sell_in_progress: bool     = False
     last_heartbeat: float      = 0.0
+    
+    # Speed Optimizations
+    cached_balance: Optional[float] = None
+    market_cache: Optional[dict]    = None
+    market_cache_ts: float         = 0.0
 
 
 _s = _State()
@@ -161,6 +170,17 @@ def _btc_now_str() -> str:
     p = _btc_now()
     return f"${p:,.2f}" if p else "N/A"
 
+def _get_balance() -> float:
+    """Returns cached balance if available, else fetches from DB."""
+    if _s.cached_balance is None:
+        _s.cached_balance = float(db.get_paper_balance(AGENT_USER_ID))
+    return _s.cached_balance
+
+def _update_balance(new_bal: float) -> None:
+    """Updates both DB and local cache."""
+    db.update_paper_balance(AGENT_USER_ID, new_bal)
+    _s.cached_balance = float(new_bal)
+
 def _et_label(slug: str) -> str:
     try:
         return _format_5m_et_label(int(slug.split("-")[-1]))
@@ -191,7 +211,13 @@ async def _binance_ws_loop() -> None:
                     data = json.loads(raw)
                     now  = time.time()
                     _s.prices.append((now, float(data["c"])))
-                    _s.prices = [(t, p) for t, p in _s.prices if now - t < 300]
+                    # Sparse pruning to keep list small and efficient (O(N) slice, but only once per 100 ticks)
+                    if len(_s.prices) % 100 == 0:
+                        start_idx = 0
+                        while start_idx < len(_s.prices) and now - _s.prices[start_idx][0] > 300:
+                            start_idx += 1
+                        if start_idx > 0:
+                            _s.prices = _s.prices[start_idx:]
         except asyncio.CancelledError:
             logger.info("[AGENT] Binance WS loop cancelled.")
             return
@@ -207,9 +233,17 @@ def _price_n_secs_ago(secs: float) -> Optional[float]:
     if not _s.prices:
         return None
     target = _s.prices[-1][0] - secs
-    for t, p in reversed(_s.prices):
-        if t <= target:
-            return float(p)
+    
+    # Binary search for performance (O(log N) instead of O(N))
+    # We use bisect on timestamps. To avoid creating a full list in memory every time, 
+    # we can use a wrapper or just slice, but for 2000 items, list creation is tiny.
+    # Actually, a deque is not indexable for slicing, but we can do:
+    # timestamps = [p[0] for p in _s.prices]
+    # For HFT, let's just use a simple list instead of deque if we want fastest bisect,
+    # or keep the small allocation. 2000 floats is very cheap.
+    idx = bisect.bisect_left(_s.prices, (target, 0.0))
+    if idx < len(_s.prices):
+        return float(_s.prices[idx][1])
     return float(_s.prices[0][1])
 
 def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -307,7 +341,7 @@ def _fmt_sell_alert(outcome: str, sell_price: float, buy_price: float,
         pnl_sign = ""
 
     roi     = (pnl / (buy_price * shares) * 100) if (buy_price * shares > 0) else 0
-    balance = db.get_paper_balance(AGENT_USER_ID)
+    balance = _get_balance()
 
     return (
         f"🤖 *AUTO SELL — {result_text}*\n\n"
@@ -470,6 +504,9 @@ async def _attempt_sell(
             _s.consecutive_losses += 1
 
         _s.session_pnl += pnl
+        
+        # Sync balance to cache after trade
+        _s.cached_balance = float(db.get_paper_balance(AGENT_USER_ID))
 
         # Apply consecutive loss pause
         if _s.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
@@ -577,76 +614,86 @@ async def _check_scalp_exit(bot) -> bool:
 
     # ── API check + exit logic ────────────────────────────────────────────────
     try:
+        # Check metadata (closed status) only every 5 seconds OR if token_id is missing
+        needs_metadata = (_s.current_token_id is None or (now_ts - _s.last_metadata_check > 5))
+        
         session = await api.get_session()
-        async with session.get(GAMMA_API_URL.format(slug=slug)) as r:
-            if r.status != 200:
-                if window_expired:
-                    logger.warning("[AGENT] Window expired + API unreachable → force sell")
+        
+        if needs_metadata:
+            _s.last_metadata_check = now_ts
+            async with session.get(GAMMA_API_URL.format(slug=slug)) as r:
+                if r.status != 200:
+                    if window_expired:
+                        logger.warning("[AGENT] Window expired + API unreachable → force sell")
+                        _s.sell_in_progress = True
+                        try:
+                            return await _do_sell()
+                        finally:
+                            _s.sell_in_progress = False
+                    return False
+
+                data    = await r.json()
+                markets = data[0].get("markets", []) if data else []
+                if not markets:
+                    return False
+
+                m = markets[0]
+
+                # ── Market resolved → sell immediately ────────────────────
+                if m.get("closed") or m.get("active") is False:
+                    logger.info("[AGENT] Market resolved → sell")
                     _s.sell_in_progress = True
                     try:
                         return await _do_sell()
                     finally:
                         _s.sell_in_progress = False
-                return False
 
-            data    = await r.json()
-            markets = data[0].get("markets", []) if data else []
-            if not markets:
-                return False
-
-            m = markets[0]
-
-            # ── Market resolved → sell immediately ────────────────────
-            if m.get("closed") or m.get("active") is False:
-                logger.info("[AGENT] Market resolved → sell")
-                _s.sell_in_progress = True
-                try:
-                    return await _do_sell()
-                finally:
-                    _s.sell_in_progress = False
-
-                # ── CLOB price → HFT scalp exit ───────────────────────────
-                if m.get("clobTokenIds"):
+                # Extract token ID if not already known
+                if _s.current_token_id is None and m.get("clobTokenIds"):
                     tids = json.loads(m["clobTokenIds"])
                     idx  = 0 if outcome.lower() in ("up", "yes") else 1
                     if tids and idx < len(tids):
-                        cp = await _get_clob_price(session, tids[idx], "buy")
-                        if cp is not None and cp > 0:
-                            roi = (cp - _s.current_buy_price) / _s.current_buy_price
-                            logger.info(
-                                "[AGENT] 📊 Hold check: %s entry=%.4f now=%.4f ROI=%+.2f%%",
-                                outcome, _s.current_buy_price, cp, roi * 100,
-                            )
+                        _s.current_token_id = str(tids[idx])
 
-                            if roi >= TAKE_PROFIT_PCT:
-                                logger.info("[AGENT] 📈 TAKE PROFIT: ROI=%.1f%%", roi * 100)
-                                _s.sell_in_progress = True
-                                try:
-                                    return await _do_sell()
-                                finally:
-                                    _s.sell_in_progress = False
+        # ── CLOB price → HFT scalp exit ───────────────────────────
+        if _s.current_token_id:
+            cp = await _get_clob_price(session, _s.current_token_id, "buy")
+            if cp is not None and cp > 0:
+                roi = (cp - _s.current_buy_price) / _s.current_buy_price
+                logger.info(
+                    "[AGENT] 📊 Hold check: %s ROI=%+.2f%% now=%.4f",
+                    outcome, roi * 100, cp,
+                )
 
-                            if roi <= -STOP_LOSS_PCT:
-                                logger.info("[AGENT] 🛑 STOP LOSS: ROI=%.1f%%", roi * 100)
-                                _s.sell_in_progress = True
-                                try:
-                                    return await _do_sell()
-                                finally:
-                                    _s.sell_in_progress = False
+                if roi >= TAKE_PROFIT_PCT:
+                    logger.info("[AGENT] 📈 TAKE PROFIT: ROI=%.1f%%", roi * 100)
+                    _s.sell_in_progress = True
+                    try:
+                        return await _do_sell()
+                    finally:
+                        _s.sell_in_progress = False
 
-                            # ── Reversal exit ─────────────────────────────
-                            if REVERSAL_EXIT:
-                                mp, _, _ = _compute_signal()
-                                if mp is not None:
-                                    is_long  = outcome.lower() == "up"
-                                    reversal = (is_long and mp < 0.45) or (not is_long and mp > 0.55)
-                                    if reversal:
-                                        logger.info("[AGENT] 🔄 REVERSAL EXIT: mp=%.3f", mp)
-                                        _s.sell_in_progress = True
-                                        try:
-                                            return await _do_sell()
-                                        finally:
-                                            _s.sell_in_progress = False
+                if roi <= -STOP_LOSS_PCT:
+                    logger.info("[AGENT] 🛑 STOP LOSS: ROI=%.1f%%", roi * 100)
+                    _s.sell_in_progress = True
+                    try:
+                        return await _do_sell()
+                    finally:
+                        _s.sell_in_progress = False
+
+                # ── Reversal exit ─────────────────────────────
+                if REVERSAL_EXIT:
+                    mp, _, _ = _compute_signal()
+                    if mp is not None:
+                        is_long  = outcome.lower() == "up"
+                        reversal = (is_long and mp < 0.45) or (not is_long and mp > 0.55)
+                        if reversal:
+                            logger.info("[AGENT] 🔄 REVERSAL EXIT: mp=%.3f", mp)
+                            _s.sell_in_progress = True
+                            try:
+                                return await _do_sell()
+                            finally:
+                                _s.sell_in_progress = False
 
     except asyncio.CancelledError:
         _s.sell_in_progress = False
@@ -677,7 +724,7 @@ async def _cycle(bot) -> None:
     now_ts = time.time()
     if int(now_ts) % 60 == 0 and now_ts - _s.last_heartbeat >= 50:
         _s.last_heartbeat = now_ts
-        bal = db.get_paper_balance(AGENT_USER_ID)
+        bal = _get_balance()
         mp, edge, _ = _compute_signal()
         logger.info(
             "[AGENT] ❤️ Tick: holding=%s portfolio=$%.2f signal=%s edge=%s cooldown=%ds",
@@ -689,7 +736,7 @@ async def _cycle(bot) -> None:
 
     # Daily risk check
     today   = _now_utc().date()
-    balance = float(db.get_paper_balance(AGENT_USER_ID))
+    balance = _get_balance()
     if _s.last_day != today:
         _s.daily_start_balance = balance
         _s.last_day = today
@@ -713,7 +760,14 @@ async def _cycle(bot) -> None:
         return
 
     # ── Signal Evaluation (not currently holding) ─────────────────────────────
-    market, mode = await _get_target_market()
+    # Cache market metadata for 20s to avoid hammering Gamma API
+    if _s.market_cache and (now_ts - _s.market_cache_ts < 20):
+        market, mode = _s.market_cache["market"], _s.market_cache["mode"]
+    else:
+        market, mode = await _get_target_market()
+        _s.market_cache = {"market": market, "mode": mode}
+        _s.market_cache_ts = now_ts
+        
     if not market:
         logger.debug("[AGENT] No tradeable market found — skip")
         return
@@ -790,6 +844,11 @@ async def _cycle(bot) -> None:
         _s.current_entry_time   = now_ts
         _s.sell_in_progress     = False
         _s.sell_retry_count     = 0
+        _s.current_token_id     = None # will be set on first check
+        _s.last_metadata_check  = 0.0
+        
+        # Sync balance after buy
+        _s.cached_balance = float(db.get_paper_balance(AGENT_USER_ID))
 
         # ── Lock this slug from being re-entered ──────────────────────────
         _s.traded_slugs.add(slug)
@@ -846,7 +905,7 @@ def stop():
     logger.info("[AGENT] Stopped")
 
 def get_status_message() -> str:
-    balance = db.get_paper_balance(AGENT_USER_ID)
+    balance = _get_balance()
     pnl     = balance - STARTING_BALANCE
     psign   = "+" if pnl >= 0 else ""
     now_ts  = time.time()
