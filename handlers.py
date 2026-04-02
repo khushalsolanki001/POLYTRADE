@@ -1283,22 +1283,40 @@ async def callback_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error("Error in quick_trade buy: %s", exc, exc_info=True)
         await query.edit_message_text(f"\u274c Error: {exc}")
 
+# ─── Global Metadata Cache ───────────────────────────────────────────────────
+_metadata_cache: dict[str, tuple[dict, float]] = {}  # {slug: (data, expiry)}
+
 async def _get_market_data(url: str) -> dict | None:
     """Fetch event+market metadata from Gamma API using the URL slug."""
     match = re.search(r'polymarket\.com/event/([^/?#]+)', url)
     if not match:
         return None
     slug = match.group(1)
+    
+    # Check cache (15s TTL)
+    now = _time.time()
+    if slug in _metadata_cache:
+        data, expiry = _metadata_cache[slug]
+        if now < expiry:
+            return data
+
     session = await api.get_session()
     async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
         if resp.status != 200:
             return None
-        data = await resp.json()
-        if not data:
+        data_list = await resp.json()
+        if not data_list or not isinstance(data_list, list):
             return None
-        if not isinstance(data, list):
-            return None
-        return data[0]
+        
+        result = data_list[0]
+        # Cache for 15 seconds
+        _metadata_cache[slug] = (result, now + 15.0)
+        
+        # Cleanup old entries occasionally
+        if len(_metadata_cache) > 100:
+            _metadata_cache.clear() # simple flush
+            
+        return result
 
 async def _get_clob_price(session: aiohttp.ClientSession, token_id: str, side: str) -> float | None:
     """
