@@ -130,6 +130,10 @@ class _State:
     market_cache: Optional[dict]    = None
     market_cache_ts: float         = 0.0
 
+    # Advanced Risk
+    current_high_roi: float        = 0.0  # highest ROI reached during current trade (for TSL)
+    trailing_stop_active: bool     = False
+
 
 _s = _State()
 
@@ -211,10 +215,10 @@ async def _binance_ws_loop() -> None:
                     data = json.loads(raw)
                     now  = time.time()
                     _s.prices.append((now, float(data["c"])))
-                    # Sparse pruning to keep list small and efficient (O(N) slice, but only once per 100 ticks)
+                    # Sparse pruning to keep last 20 minutes of data for indicators
                     if len(_s.prices) % 100 == 0:
                         start_idx = 0
-                        while start_idx < len(_s.prices) and now - _s.prices[start_idx][0] > 300:
+                        while start_idx < len(_s.prices) and now - _s.prices[start_idx][0] > 1200:
                             start_idx += 1
                         if start_idx > 0:
                             _s.prices = _s.prices[start_idx:]
@@ -246,6 +250,34 @@ def _price_n_secs_ago(secs: float) -> Optional[float]:
         return float(_s.prices[idx][1])
     return float(_s.prices[0][1])
 
+def _compute_rsi(periods: int = 14) -> Optional[float]:
+    """Calculate RSI based on 1-min increments."""
+    if len(_s.prices) < (periods * 60):
+        return None
+    
+    # Sample price changes every minute
+    deltas = []
+    for i in range(1, periods + 1):
+        p_now = _price_n_secs_ago((i-1)*60)
+        p_prev = _price_n_secs_ago(i*60)
+        if p_now and p_prev:
+            deltas.append(p_now - p_prev)
+            
+    if not deltas:
+        return None
+        
+    gains = [d for d in deltas if d > 0]
+    losses = [abs(d) for d in deltas if d < 0]
+    
+    avg_gain = sum(gains) / periods
+    avg_loss = sum(losses) / periods
+    
+    if avg_loss == 0:
+        return 100.0
+    
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
 def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """Returns (momentum_p, edge, raw_factor). 1-min and 3-min must AGREE."""
     if len(_s.prices) < MIN_PRICE_SAMPLES:
@@ -261,8 +293,20 @@ def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]
     mom1 = (now_p - p1) / p1 if p1 else 0.0
     mom3 = (now_p - p3) / p3 if p3 else 0.0
 
-    # Both must agree in direction
+    # RSI Filter: avoid buying at tops or selling at bottoms
+    rsi = _compute_rsi(10)
+    if rsi is not None:
+        if mom1 > 0 and rsi > 80: # extremely overbought
+            return None, None, float(mom1)
+        if mom1 < 0 and rsi < 20: # extremely oversold
+            return None, None, float(mom1)
+
+    # Both must agree in direction and have minimum velocity
     if (mom1 >= 0) != (mom3 >= 0):
+        return None, None, float(mom1)
+    
+    # Velocity threshold: require at least 0.01% movement in 1min
+    if abs(mom1) < 0.0001:
         return None, None, float(mom1)
 
     factor     = (mom1 * 12) + (mom3 * 8)
