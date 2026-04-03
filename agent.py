@@ -70,6 +70,12 @@ STOP_LOSS_PCT   = 0.05  # -5% ROI → Close early
 REVERSAL_EXIT   = True  # Exit if signal flips against us
 KELLY_FRACTION  = 0.10  # Risk 10% of portfolio max per trade (Kelly-lite)
 
+# Advanced Risk Settings
+TSL_ACTIVATE_PCT = 0.04  # Activate trailing stop at +4% profit
+TSL_TRAILING_PCT = 0.02  # Trailing distance (2%)
+MAX_SPREAD_PCT   = 0.03  # Max allowed spread (3%) before entry
+THETA_EXIT_SECS  = 265   # Exit if window is nearly closed and conditions met
+
 WINDOW_SECS      = 300
 SELL_RETRY_MAX   = 6     # max retries for sell
 SELL_RETRY_DELAY = 30    # seconds between 'awaiting resolution' retries
@@ -709,21 +715,53 @@ async def _check_scalp_exit(bot) -> bool:
                     outcome, roi * 100, cp,
                 )
 
+                # ── TSL & ROBUST EXIT LOGIC ──
+                _s.current_high_roi = max(_s.current_high_roi, roi)
+                
+                # Take Profit (Hard target)
                 if roi >= TAKE_PROFIT_PCT:
                     logger.info("[AGENT] 📈 TAKE PROFIT: ROI=%.1f%%", roi * 100)
                     _s.sell_in_progress = True
-                    try:
-                        return await _do_sell()
-                    finally:
-                        _s.sell_in_progress = False
+                    try: return await _do_sell()
+                    finally: _s.sell_in_progress = False
 
-                if roi <= -STOP_LOSS_PCT:
+                # Trailing Stop Loss Activation
+                if not _s.trailing_stop_active and roi >= TSL_ACTIVATE_PCT:
+                    _s.trailing_stop_active = True
+                    logger.info("[AGENT] 🛡️ Trailing Stop Activated at ROI=%.1f%%", roi * 100)
+
+                if _s.trailing_stop_active:
+                    # Move stop to (High - Trailing Dist)
+                    tsl_exit_threshold = _s.current_high_roi - TSL_TRAILING_PCT
+                    # Floor at break-even once TSL is active
+                    tsl_exit_threshold = max(0.005, tsl_exit_threshold) # +0.5% buffer for fees
+                    
+                    if roi <= tsl_exit_threshold:
+                        logger.info("[AGENT] 📉 TRAILING STOP HIT: ROI=%.1f%% (High was %.1f%%)", roi * 100, _s.current_high_roi * 100)
+                        _s.sell_in_progress = True
+                        try: return await _do_sell()
+                        finally: _s.sell_in_progress = False
+
+                # Hard Stop Loss (fallback)
+                if not _s.trailing_stop_active and roi <= -STOP_LOSS_PCT:
                     logger.info("[AGENT] 🛑 STOP LOSS: ROI=%.1f%%", roi * 100)
                     _s.sell_in_progress = True
-                    try:
-                        return await _do_sell()
-                    finally:
-                        _s.sell_in_progress = False
+                    try: return await _do_sell()
+                    finally: _s.sell_in_progress = False
+
+                # ── Time-Decay (Theta) Exit ──
+                # If window is ending soon, lock in any winner or cut a bad loser
+                if age is not None and age > THETA_EXIT_SECS:
+                    if roi > 0.01:
+                        logger.info("[AGENT] ⌛ THETA EXIT (Profit Lock): ROI=%.1f%%", roi * 100)
+                        _s.sell_in_progress = True
+                        try: return await _do_sell()
+                        finally: _s.sell_in_progress = False
+                    elif roi < -0.03:
+                        logger.info("[AGENT] ⌛ THETA EXIT (Loss Cut): ROI=%.1f%%", roi * 100)
+                        _s.sell_in_progress = True
+                        try: return await _do_sell()
+                        finally: _s.sell_in_progress = False
 
                 # ── Reversal exit ─────────────────────────────
                 if REVERSAL_EXIT:
@@ -860,12 +898,37 @@ async def _cycle(bot) -> None:
     m1    = (now_p - p1v) / p1v if p1v else 0.0
     m3    = (now_p - p3v) / p3v if p3v else 0.0
 
-    # Kelly Sizing
-    t_amt = AGENT_TRADE_USD
+    # Dynamic Kelly Sizing based on Edge strength
+    base_amt = AGENT_TRADE_USD
+    # Multiplier: if edge is 2x AGENT_MIN_EDGE, we double the trade size (up to 3x cap)
+    multiplier = edge / AGENT_MIN_EDGE
+    multiplier = max(1.0, min(3.0, multiplier))
+    
+    t_amt = base_amt * multiplier
     if balance > STARTING_BALANCE:
-        t_amt = min(AGENT_TRADE_USD * 3, balance * KELLY_FRACTION)
+        # Scale with portfolio but cap at 10% or 3x base
+        t_amt = min(AGENT_TRADE_USD * 3, balance * KELLY_FRACTION, t_amt)
 
     outcome = "Up" if m_p > 0.5 else "Down"
+
+    # ── Spread Check ──
+    try:
+        session = await api.get_session()
+        m_data = await _get_target_market(slug)
+        if m_data and m_data[0]:
+            t_ids = json.loads(m_data[0].get("clobTokenIds", "[]"))
+            outcomes = json.loads(m_data[0].get("outcomes", "[]"))
+            idx = 0 if outcome.lower() == "up" else 1
+            if t_ids and idx < len(t_ids):
+                ask = await _get_clob_price(session, t_ids[idx], "sell")
+                bid = await _get_clob_price(session, t_ids[idx], "buy")
+                if ask and bid:
+                    spread = (ask - bid) / ((ask + bid) / 2)
+                    if spread > MAX_SPREAD_PCT:
+                        logger.info("[AGENT] 🛡️ Spread too wide: %.1f%% > %.1f%% — skip", spread * 100, MAX_SPREAD_PCT * 100)
+                        return
+    except Exception as e:
+        logger.warning("[AGENT] Spread check failed: %s", e)
 
     logger.info(
         "[AGENT] 🔔 Signal → %s  edge=%.2f%%  mom1=%.2f%%  mom3=%.2f%%  slug=%s",
@@ -890,6 +953,8 @@ async def _cycle(bot) -> None:
         _s.sell_retry_count     = 0
         _s.current_token_id     = None # will be set on first check
         _s.last_metadata_check  = 0.0
+        _s.current_high_roi     = 0.0
+        _s.trailing_stop_active = False
         
         # Sync balance after buy
         _s.cached_balance = float(db.get_paper_balance(AGENT_USER_ID))
