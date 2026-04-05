@@ -251,10 +251,9 @@ def _price_n_secs_ago(secs: float) -> Optional[float]:
     # timestamps = [p[0] for p in _s.prices]
     # For HFT, let's just use a simple list instead of deque if we want fastest bisect,
     # or keep the small allocation. 2000 floats is very cheap.
-    idx = bisect.bisect_left(_s.prices, (target, 0.0))
-    if 0 < idx < len(_s.prices):
-        # We take the one closer to target ts
-        return float(_s.prices[idx][1])
+    idx = bisect.bisect_right(_s.prices, (target, float('inf')))
+    if idx > 0:
+        return float(_s.prices[idx - 1][1])
     return float(_s.prices[0][1]) if _s.prices else None
 
 def _compute_rsi(periods: int = 14) -> Optional[float]:
