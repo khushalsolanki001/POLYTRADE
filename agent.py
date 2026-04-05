@@ -252,9 +252,10 @@ def _price_n_secs_ago(secs: float) -> Optional[float]:
     # For HFT, let's just use a simple list instead of deque if we want fastest bisect,
     # or keep the small allocation. 2000 floats is very cheap.
     idx = bisect.bisect_left(_s.prices, (target, 0.0))
-    if idx < len(_s.prices):
+    if 0 < idx < len(_s.prices):
+        # We take the one closer to target ts
         return float(_s.prices[idx][1])
-    return float(_s.prices[0][1])
+    return float(_s.prices[0][1]) if _s.prices else None
 
 def _compute_rsi(periods: int = 14) -> Optional[float]:
     """Calculate RSI based on 1-min increments."""
@@ -315,8 +316,12 @@ def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]
     if abs(mom1) < 0.0001:
         return None, None, float(mom1)
 
-    factor     = (mom1 * 12) + (mom3 * 8)
-    momentum_p = max(0.05, min(0.95, 0.5 + factor))
+    # Momentum is EMA-like weighting
+    # factor = (Weighted Avg of Mom1 and Mom3)
+    factor     = (mom1 * 15.0) + (mom3 * 5.0)
+    
+    # Sigmoid-ish probability centering at 0.5
+    momentum_p = max(0.1, min(0.9, 0.5 + factor))
     edge       = abs(momentum_p - 0.5)
 
     return momentum_p, edge, factor
@@ -768,7 +773,8 @@ async def _check_scalp_exit(bot) -> bool:
                     mp, _, _ = _compute_signal()
                     if mp is not None:
                         is_long  = outcome.lower() == "up"
-                        reversal = (is_long and mp < 0.45) or (not is_long and mp > 0.55)
+                        # Looser reversal to avoid noise — exit if prob flips > 15% against us
+                        reversal = (is_long and mp < 0.35) or (not is_long and mp > 0.65)
                         if reversal:
                             logger.info("[AGENT] 🔄 REVERSAL EXIT: mp=%.3f", mp)
                             _s.sell_in_progress = True
@@ -1011,6 +1017,14 @@ def stop():
     for t in _s.tasks:
         t.cancel()
     _s.tasks = []
+    
+    # Sync shutdown session
+    try:
+        import api
+        asyncio.create_task(api.close_session())
+    except Exception:
+        pass
+    
     logger.info("[AGENT] Stopped")
 
 def get_status_message() -> str:
