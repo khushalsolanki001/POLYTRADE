@@ -232,7 +232,7 @@ def get_paper_balance(user_id: int) -> float:
     """Get the current virtual balance of a paper user."""
     with _connect() as conn:
         row = conn.execute("SELECT balance FROM paper_users WHERE user_id = ?", (user_id,)).fetchone()
-        return row["balance"] if row else 0.0
+        return (row["balance"] if row["balance"] is not None else 0.0) if row else 0.0
 
 def update_paper_balance(user_id: int, new_balance: float) -> None:
     """Update the virtual balance of a paper user."""
