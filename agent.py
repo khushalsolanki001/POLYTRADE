@@ -58,6 +58,8 @@ AGENT_TRADE_USD: float  = float(os.getenv("AGENT_TRADE_USD",  "25"))
 AGENT_MIN_EDGE: float   = float(os.getenv("AGENT_MIN_EDGE",   "0.02"))   # 2% min (Aggressive)
 AGENT_POLL_SECONDS: int = int(os.getenv("AGENT_POLL_SECONDS", "1"))      # HARD TRADING: 1s poll
 
+COPY_SOURCE_WALLET = "0xb27bc932bf8110d8f78e55da7d5f0497a18b5b82"
+
 MAX_CONSECUTIVE_LOSSES = 5
 PAUSE_DURATION         = 300    # 5-min cool-down after too many losses
 MAX_DAILY_LOSS_PCT     = 0.20
@@ -1053,3 +1055,60 @@ def get_status_message() -> str:
         f"⚙️ *HFT:* Polling 1s \\| TP 8% \\| SL 5% \\| Cooldown {POST_SELL_COOLDOWN}s\n"
         f"⏰ `{_esc_code(_now_ist_str())}`"
     )
+
+async def process_copy_trade(wallet: str, trade_type: str, outcome: str, usd_value: float, title: str, slug: str, app) -> None:
+    """
+    Called by scanner when the tracked copy-trade wallet makes a trade.
+    Executes an arbitrage/copy paper trade mimicking the source.
+    """
+    if wallet.lower() != COPY_SOURCE_WALLET.lower():
+        return
+        
+    if not _s.enabled or not _s.running:
+        return
+        
+    chat_id = _resolve_chat_id()
+    if not chat_id:
+        return
+        
+    logger.info(f"[COPY-AGENT] Detected trade from {COPY_SOURCE_WALLET}: {trade_type} {outcome} (Slug: {slug})")
+    
+    # Determine sizing: scale proportionally or use our fixed agent amount
+    # We will use the agent's base trade size for safety.
+    amount_to_trade = AGENT_TRADE_USD
+    
+    try:
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=f"🤖 *Agent Copy Trade Detected*\nSource: `{COPY_SOURCE_WALLET[:8]}...`\nAction: {trade_type} *{_esc(outcome)}*\nMarket: {_esc(title)}\n_Executing copy trade..._",
+            parse_mode="MarkdownV2"
+        )
+    except Exception as e:
+        logger.warning(f"Could not send copy trade alert: {e}")
+    
+    try:
+        if trade_type == "BUY":
+            ok, msg, _ = await _paper_buy_core(AGENT_USER_ID, outcome, amount_to_trade, slug_override=slug)
+        else:
+            # Sell our position for this outcome/slug
+            # amount_key=None means sell all shares for this outcome
+            ok, msg = await _paper_sell_core(AGENT_USER_ID, outcome, amount_key=None, slug_override=slug)
+            
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ *Copy Trade Executed:*\n{msg}\n_Arbitrage synced successfully\\._",
+                parse_mode="MarkdownV2"
+            )
+        except Exception:
+            plain_msg = msg.replace('*', '').replace('`', '').replace('\\', '')
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Copy Trade Executed:\n{plain_msg}"
+            )
+    except Exception as e:
+        logger.error(f"[COPY-AGENT] Execution failed: {e}")
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=f"❌ Agent copy trade failed: {e}")
+        except Exception:
+            pass
