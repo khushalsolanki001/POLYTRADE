@@ -94,8 +94,9 @@ def _esc(text: str) -> str:
     NOTE: We intentionally do NOT use ~ in any message templates (it triggers
     strikethrough formatting). Use the \u2248 character instead for 'approximately'.
     """
-    special = r"\_*[]()~`>#+-=|{}.!"
-    return "".join(f"\\{c}" if c in special else c for c in str(text))
+    text = str(text).replace("~", "\u2248")
+    special = r"\_*[]()`>#+-=|{}.!"
+    return "".join(f"\\{c}" if c in special else c for c in text)
 
 def _esc_code(text: str) -> str:
     """Escape special MarkdownV2 characters for use INSIDE code blocks."""
