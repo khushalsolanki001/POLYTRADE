@@ -1301,23 +1301,34 @@ async def _get_market_data(url: str) -> dict | None:
         if now < expiry:
             return data
 
-    session = await api.get_session()
-    async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
-        if resp.status != 200:
-            return None
-        data_list = await resp.json()
-        if not data_list or not isinstance(data_list, list):
-            return None
-        
-        result = data_list[0]
-        # Cache for 15 seconds
-        _metadata_cache[slug] = (result, now + 15.0)
-        
-        # Cleanup old entries occasionally
-        if len(_metadata_cache) > 100:
-            _metadata_cache.clear() # simple flush
+    try:
+        session = await api.get_session()
+        async with session.get(GAMMA_API_URL.format(slug=slug)) as resp:
+            if resp.status != 200:
+                logger.warning("Gamma API returned %d for slug %s", resp.status, slug)
+                return None
+            data_list = await resp.json()
+            if not data_list or not isinstance(data_list, list):
+                return None
             
-        return result
+            result = data_list[0]
+            # Cache for 15 seconds
+            _metadata_cache[slug] = (result, now + 15.0)
+            
+            # Cleanup old entries occasionally
+            if len(_metadata_cache) > 100:
+                _metadata_cache.clear() # simple flush
+                
+            return result
+    except asyncio.TimeoutError:
+        logger.warning("Timeout fetching market data for slug %s", slug)
+        return None
+    except (aiohttp.ClientError, OSError) as exc:
+        logger.warning("Network error fetching market data for slug %s: %s", slug, exc)
+        return None
+    except Exception as exc:
+        logger.error("Unexpected error in _get_market_data for %s: %s", slug, exc)
+        return None
 
 async def _get_clob_price(session: aiohttp.ClientSession, token_id: str, side: str) -> float | None:
     """
