@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import functools
 from web3 import Web3
 from web3.exceptions import Web3Exception
 from datetime import datetime, timezone
@@ -12,6 +13,9 @@ from api import (
     parse_trade_type, parse_trade_size,
     parse_trade_usd_value, parse_trade_timestamp,
 )
+
+# Maximum block lag before we skip ahead (avoid hours of catch-up)
+MAX_BLOCK_LAG = 5000
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +136,12 @@ async def run_market_cacher():
 
 _cacher_task: asyncio.Task | None = None
 
+async def _run_in_thread(func, *args):
+    """Run a synchronous function in the default executor to avoid blocking asyncio."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args))
+
+
 async def run_block_scanner(app):
     """Background task to scan blocks every 3 seconds for instant alerts."""
     global _cacher_task
@@ -149,7 +159,7 @@ async def run_block_scanner(app):
     else:
         # We start searching from 5 blocks behind current to catch up
         try:
-            start_block = w3.eth.block_number - 5
+            start_block = await _run_in_thread(lambda: w3.eth.block_number) - 5
             logger.info(f"🚀 Block scanner started from block {start_block} (default -5)")
         except Exception as e:
             logger.error(f"Failed to get initial block number: {e}")
@@ -158,7 +168,21 @@ async def run_block_scanner(app):
     try:
         while True:
             try:
-                latest_block = w3.eth.block_number
+                # Run synchronous Web3 calls in a thread so they don't block asyncio
+                latest_block = await _run_in_thread(lambda: w3.eth.block_number)
+
+                # If we are too far behind, skip ahead to avoid blocking for hours
+                lag = latest_block - start_block
+                if lag > MAX_BLOCK_LAG:
+                    old_start = start_block
+                    start_block = latest_block - 50  # jump to near-tip
+                    set_setting("last_scanned_block", str(start_block))
+                    logger.warning(
+                        "⚡ Scanner was %d blocks behind (block %d → %d). "
+                        "Skipping ahead to %d to avoid blocking.",
+                        lag, old_start, latest_block, start_block,
+                    )
+
                 if start_block > latest_block:
                     await asyncio.sleep(2)
                     continue
@@ -181,16 +205,17 @@ async def run_block_scanner(app):
                     tracked_wallets[addr].append(row)
 
                 # Max blocks to fetch at once to prevent RPC timeouts
-                end_block = min(start_block + 500, latest_block)
+                end_block = min(start_block + 200, latest_block)
                 
-                # logger.debug(f"Scanning blocks {start_block} to {end_block}")
-                
-                logs = w3.eth.get_logs({
-                    'address': CTF_CONTRACT,
-                    'fromBlock': start_block,
-                    'toBlock': end_block,
-                    'topics': [TRANSFER_SINGLE_TOPIC]
-                })
+                # Run the heavy RPC call in a thread to avoid blocking asyncio
+                logs = await _run_in_thread(
+                    lambda: w3.eth.get_logs({
+                        'address': CTF_CONTRACT,
+                        'fromBlock': start_block,
+                        'toBlock': end_block,
+                        'topics': [TRANSFER_SINGLE_TOPIC]
+                    })
+                )
                 
                 for log in logs:
                     _from = ('0x' + log['topics'][2].hex()[-40:]).lower()
