@@ -14,6 +14,7 @@ Defines every handler that the ApplicationBuilder registers:
 import re
 import os
 import logging
+import asyncio
 import chart # type: ignore
 import time as _time
 from datetime import datetime, timezone
