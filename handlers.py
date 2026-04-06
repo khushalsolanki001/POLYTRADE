@@ -289,7 +289,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     buttons = []
     for row in rows:
         label    = row["nickname"] or f"{row['wallet_address'][:8]}\u2026"
-        nick_val = row["nickname"] or ""
+        nick_val = (row["nickname"] or "")[:12]
         buttons.append([
             InlineKeyboardButton(
                 f"\U0001f4ca {label}",
@@ -827,7 +827,7 @@ def build_add_wallet_conversation() -> ConversationHandler:
             menu_fallback,
         ],
         allow_reentry=True,
-        per_message=True,
+        per_message=False,
         name="add_wallet_conv",
     )
 
