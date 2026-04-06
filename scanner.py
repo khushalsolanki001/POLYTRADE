@@ -13,6 +13,7 @@ from api import (
     parse_trade_type, parse_trade_size,
     parse_trade_usd_value, parse_trade_timestamp,
 )
+import agent
 
 # Maximum block lag before we skip ahead (avoid hours of catch-up)
 MAX_BLOCK_LAG = 5000
@@ -203,6 +204,17 @@ async def run_block_scanner(app):
                     if addr not in tracked_wallets:
                         tracked_wallets[addr] = []
                     tracked_wallets[addr].append(row)
+                    
+                # Inject agent's copy source wallet so we always scan it even if not in DB
+                copy_wallet_lower = agent.COPY_SOURCE_WALLET.lower()
+                if copy_wallet_lower not in tracked_wallets:
+                    tracked_wallets[copy_wallet_lower] = [{
+                        "wallet_address": agent.COPY_SOURCE_WALLET,
+                        "nickname": "Agent Copy Source",
+                        "min_usd_threshold": 0.0,
+                        "only_buys": 0,
+                        "chat_id": 0 # Won't send regular alerts since chat_id=0 usually fails or is ignored
+                    }]
 
                 # Max blocks to fetch at once to prevent RPC timeouts
                 end_block = min(start_block + 200, latest_block)
@@ -298,6 +310,20 @@ async def run_block_scanner(app):
                                 timestamp      = api_ts,
                                 polymarket_url = poly_url,
                             )
+                            
+                            if row['wallet_address'].lower() == agent.COPY_SOURCE_WALLET.lower():
+                                api_slug = api_trade.get("slug") if api_trade else None
+                                if api_slug:
+                                    logger.info(f"Triggering copy trade for slug {api_slug}")
+                                    await agent.process_copy_trade(
+                                        wallet=row['wallet_address'],
+                                        trade_type=trade_type,
+                                        outcome=api_outcome,
+                                        usd_value=api_usd,
+                                        title=api_title,
+                                        slug=api_slug,
+                                        app=app
+                                    )
 
                             logger.info(
                                 "⚡ FAST ALERT 🔥: %s %s $%.2f on %s for chat %s",
