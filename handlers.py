@@ -1138,12 +1138,21 @@ async def _get_target_market(slug_override: str | None = None) -> tuple[dict | N
         (ts + WINDOW_SECONDS, "auto-next"),
     ]
 
+    first_attempt_failed = False
     for candidate_ts, label in candidates:
         slug = _compute_5m_slug(candidate_ts)
         url = f"https://polymarket.com/event/{slug}"
         logger.info("Trying BTC 5m slug: %s (%s)", slug, label)
         event = await _get_market_data(url)
-        if event and event.get("markets"):
+        if event is None:
+            # If even the first attempt returned None (likely network error),
+            # don't waste time trying the other slugs — they'll fail too.
+            if not first_attempt_failed:
+                first_attempt_failed = True
+                continue  # give one more chance with next slug
+            logger.warning("Multiple API failures — Polymarket API may be unreachable")
+            return None, "Polymarket API is unreachable right now\\. Check your network/VPN\\."
+        if event.get("markets"):
             market = event["markets"][0]
             if _is_market_tradeable(market):
                 logger.info("Found tradeable market: %s (mode=%s)", slug, label)
@@ -1151,16 +1160,17 @@ async def _get_target_market(slug_override: str | None = None) -> tuple[dict | N
             else:
                 logger.info("Market %s exists but is closed/resolved, skipping", slug)
 
-    # Last resort: return any found market even if resolved
-    for candidate_ts, label in candidates:
-        slug = _compute_5m_slug(candidate_ts)
-        url = f"https://polymarket.com/event/{slug}"
-        event = await _get_market_data(url)
-        if event and event.get("markets"):
-            logger.warning("Using resolved market %s as fallback", slug)
-            return event["markets"][0], f"{label}-resolved"
+    # Last resort: return any found market even if resolved (only try if API was reachable)
+    if not first_attempt_failed:
+        for candidate_ts, label in candidates:
+            slug = _compute_5m_slug(candidate_ts)
+            url = f"https://polymarket.com/event/{slug}"
+            event = await _get_market_data(url)
+            if event and event.get("markets"):
+                logger.warning("Using resolved market %s as fallback", slug)
+                return event["markets"][0], f"{label}-resolved"
 
-    return None, "Could not load BTC 5m market data."
+    return None, "Could not load BTC 5m market data\\."
 
 
 async def cmd_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1170,7 +1180,10 @@ async def cmd_quick_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     market, mode = await _get_target_market()
     if not market:
-        await update.message.reply_text("Could not load quick trade market right now.")
+        err_msg = mode or "Could not load quick trade market right now."
+        # mode may contain MarkdownV2 escapes, send as plain text
+        plain_err = str(err_msg).replace("\\\\", "").replace("\\.", ".").replace("\\!", "!")
+        await update.message.reply_text(f"⚠️ {plain_err}")
         return
 
     title = market.get("question") or market.get("title") or "BTC Up/Down 5m"
