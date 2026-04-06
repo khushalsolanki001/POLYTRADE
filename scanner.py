@@ -78,14 +78,15 @@ async def fetch_market_info(asset_id: str, address: str = ""):
                     result = {
                         "title": title,
                         "outcome": outcome,
-                        "price": price
+                        "price": price,
+                        "slug": t.get("slug", "")
                     }
                     _asset_cache[asset_id] = result
                     return result
         except Exception as e:
             logger.error(f"Fallback fetch_trades error for {asset_id}: {e}")
             
-    return {"title": "Unknown Market", "outcome": "?", "price": 0.5}
+    return {"title": "Unknown Market", "outcome": "?", "price": 0.5, "slug": ""}
 
 async def run_market_cacher():
     """Continuously fetches all active markets from CLOB API to populate _asset_cache."""
@@ -114,7 +115,8 @@ async def run_market_cacher():
                                 _asset_cache[t_id] = {
                                     "title": title,
                                     "outcome": str(t.get('outcome', '?')),
-                                    "price": float(t.get('price', 0.5))
+                                    "price": float(t.get('price', 0.5)),
+                                    "slug": m.get("slug", "")
                                 }
 
                     next_cursor = data.get('next_cursor')
@@ -282,10 +284,15 @@ async def run_block_scanner(app):
                             api_outcome = market_info["outcome"]
                             api_title   = market_info["title"]
                             api_ts      = ts
+                            api_slug    = market_info.get("slug", "")
                             logger.warning(
                                 "⚠️ API trade not found for token %s wallet %s — using raw on-chain data",
                                 token_id, primary_wallet[:10],
                             )
+                            
+                        # If api_trade was valid, grab slug from it. If not, use the fallback we caught
+                        if api_trade:
+                            api_slug = api_trade.get("slug")
 
                         for row, side in matches:
                             trade_type = api_type or side  # API type takes priority
@@ -312,7 +319,6 @@ async def run_block_scanner(app):
                             )
                             
                             if row['wallet_address'].lower() == agent.COPY_SOURCE_WALLET.lower():
-                                api_slug = api_trade.get("slug") if api_trade else None
                                 if api_slug:
                                     logger.info(f"Triggering copy trade for slug {api_slug}")
                                     await agent.process_copy_trade(
