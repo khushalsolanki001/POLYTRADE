@@ -971,7 +971,7 @@ def _resolve_slug_from_args(args: list[str]) -> tuple[str | None, list[str]]:
         m = re.search(r"polymarket\.com/event/([^/?#]+)", first)
         if m:
             slug = m.group(1)
-            if slug.startswith(TARGET_EVENT_SLUG_BASE):
+            if "-updown-5m" in slug:
                 return slug, args[1:]
             else:
                 return None, []  # signal unsupported
@@ -1128,7 +1128,7 @@ async def _get_target_market(slug_override: str | None = None) -> tuple[dict | N
         if event and event.get("markets"):
             market = event["markets"][0]
             return market, "specific"
-        return None, "Could not load BTC 5m market data."
+        return None, "Could not load specific market data."
 
     ts = _compute_current_5m_timestamp()
     # Try windows in priority order: current → previous → next
