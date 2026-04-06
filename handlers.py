@@ -971,7 +971,7 @@ def _resolve_slug_from_args(args: list[str]) -> tuple[str | None, list[str]]:
         m = re.search(r"polymarket\.com/event/([^/?#]+)", first)
         if m:
             slug = m.group(1)
-            if "-updown-5m" in slug:
+            if "-updown-" in slug:
                 return slug, args[1:]
             else:
                 return None, []  # signal unsupported
