@@ -42,7 +42,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Session lifecycle
+#  Session lifecycle 123
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_session() -> aiohttp.ClientSession:
