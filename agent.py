@@ -328,7 +328,7 @@ def _compute_signal() -> Tuple[Optional[float], Optional[float], Optional[float]
     return momentum_p, edge, factor
 
 
-# ─── Telegram Notifications ────────────────────────────────────────────────────
+# ─── Telegram Notifications via bot────────────────────────────────────────────────────
 
 async def _send(bot, text: str) -> None:
     chat_id = _resolve_chat_id()
