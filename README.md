@@ -229,4 +229,5 @@ some more features are coming soon
 
 MIT — free to use, modify, and distribute.
 
-this was in devlopment not accurate
+this was in devlopment not accurate 
+DYOR.
