@@ -328,7 +328,7 @@ python3 -c "import db; db.update_paper_balance(9999, 1000.0); print('Desktop bal
 - Paper trading only — no real money is ever used
 
 ---
-
+some more feature coming soon
 ## 📜 License
 
 MIT — free to use, modify, and distribute.
